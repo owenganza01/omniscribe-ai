@@ -1,10 +1,10 @@
-# OmniScribe AI 🎙️
+# OmniScribe AI
 
 OmniScribe AI is a mobile-first, context-aware meeting intelligence assistant. It helps teams capture live meeting audio or uploaded call recordings, transcribes them into readable logs, retains company knowledge in an internal Vault, and uses Anthropic Claude to extract summaries, action items, and answers to questions (with automatic public web fallback when internal answers are insufficient).
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```text
 omniscribe-ai/
@@ -24,13 +24,13 @@ omniscribe-ai/
 
 ---
 
-## 🚀 Quickstart Guide
+## Quickstart Guide
 
 ### Prerequisites
 - Python 3.10 or higher installed.
 - A modern web browser (Chrome, Edge, Safari, Firefox).
 - A free Groq API key for speech-to-text (no credit card required, get one from [console.groq.com/keys](https://console.groq.com/keys)).
-- An Anthropic Claude API key is **optional**. Leave `MOCK_AI_RESPONSE=true` to run without it (see [AI analysis](#-ai-analysis-currently-mocked)).
+- An Anthropic Claude API key is **optional**. Leave `MOCK_AI_RESPONSE=true` to run without it (see [AI analysis](#ai-analysis-currently-mocked)).
 
 ---
 
@@ -96,7 +96,7 @@ The frontend is a lightweight, zero-build client styled with Tailwind CSS.
 
 ---
 
-## 🎧 Speech-to-Text (Groq Whisper Large V3 Turbo)
+## Speech-to-Text (Groq Whisper Large V3 Turbo)
 
 Recordings are transcribed by `whisper-large-v3-turbo` through Groq's free API tier. The implementation lives in `backend/transcription.py`, and `POST /api/process-meeting` calls it.
 
@@ -122,13 +122,13 @@ python backend/test_backend.py
 
 ---
 
-## 🧪 AI Analysis (Currently Mocked)
+## AI Analysis (Currently Mocked)
 
 Summaries, action items, and Q&A come from a **placeholder** while `MOCK_AI_RESPONSE=true`. The transcript is real Groq output. Everything else is labelled `[MOCK]`. The Anthropic integration is kept in `backend/main.py` for later replacement with a free hosted model. It is not used unless `MOCK_AI_RESPONSE` is set to `false`, and it then requires paid Anthropic credits.
 
 ---
 
-## 🗺️ Project Milestones
+## Project Milestones
 
 - [x] **Milestone 1**: Repository Cleanup & Standard Structure (Preserved official UI, organized `backend/` and `frontend/`, created dependency manifests and security ignores).
 - [ ] **Milestone 2**: Backend Repair & API Standardization (Fix web fallback query, add dotenv loader, accept web search toggle, structure Claude JSON responses).
