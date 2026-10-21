@@ -1,0 +1,719 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>OmniScribe AI</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: '#09090D', panel: '#14141B', raise: '#1C1C26', line: '#272733',
+          fg: '#F1F1F5', muted: '#A1A1B0', dim: '#7A7A8A',
+          sky: '#7DD3FC', rec: '#FF453A', ok: '#30D158', web: '#FBBF24'
+        },
+        fontFamily: {
+          display: ['Sora', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+          sans: ['"IBM Plex Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+          mono: ['"IBM Plex Mono"', 'ui-monospace', 'Menlo', 'monospace']
+        }
+      }
+    }
+  };
+</script>
+<style>
+  /* Layout: a single iPhone-sized frame (390x844) centred on a dark stage; on a phone it fills the screen. */
+  :root { --stage: #050507; --ink: #09090D; color-scheme: dark; }
+  html, body { height: 100%; }
+  body { background: var(--stage); color: #F1F1F5; font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+         padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 24px; box-sizing: border-box; }
+  .phone { width: 100%; max-width: 390px; height: min(844px, calc(100vh - 48px)); }
+  @media (max-width: 440px) {
+    body { padding: 0; }
+    .phone { max-width: none; height: 100%; border-radius: 0 !important; border: 0 !important; }
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+
+  .switch { position: relative; width: 51px; height: 31px; border-radius: 999px; background: #3A3A46; transition: background .25s; flex: none; }
+  .switch[aria-checked="true"] { background: #30D158; }
+  .switch .knob { position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.4); transition: transform .25s cubic-bezier(.3,.7,.4,1); }
+  .switch[aria-checked="true"] .knob { transform: translateX(20px); }
+
+  .ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid rgba(255,69,58,.55); opacity: 0; pointer-events: none; }
+  .is-rec .ring { animation: ripple 1.8s ease-out infinite; }
+  .is-rec .ring.r2 { animation-delay: .6s; } .is-rec .ring.r3 { animation-delay: 1.2s; }
+  @keyframes ripple { 0% { transform: scale(.78); opacity: .9 } 100% { transform: scale(1.38); opacity: 0 } }
+  .rec-btn { transition: background .3s, box-shadow .3s, transform .15s; }
+  .rec-btn:active { transform: scale(.95); }
+  .is-rec .rec-btn { background: #FF453A; box-shadow: 0 10px 40px rgba(255,69,58,.45); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { transform: scale(1) } 50% { transform: scale(1.06) } }
+  .blink { animation: blink 1s steps(2,start) infinite; } @keyframes blink { to { visibility: hidden } }
+  .bars span { width: 3px; border-radius: 2px; background: #FF6961; animation: eq .9s ease-in-out infinite; }
+  .bars span:nth-child(2){animation-delay:.15s}.bars span:nth-child(3){animation-delay:.3s}.bars span:nth-child(4){animation-delay:.45s}.bars span:nth-child(5){animation-delay:.6s}.bars span:nth-child(6){animation-delay:.75s}.bars span:nth-child(7){animation-delay:.2s}
+  @keyframes eq { 0%,100% { height: 4px } 50% { height: 22px } }
+
+  /* flex-shrink: 0 stops the scroller's flex column from squashing open results to 0px height */
+  .results { flex-shrink: 0; max-height: 0; opacity: 0; transform: translateY(32px); overflow: hidden; transition: max-height .7s cubic-bezier(.2,.8,.2,1), opacity .5s ease, transform .6s cubic-bezier(.2,.8,.2,1); }
+  .results.open { max-height: 20000px; opacity: 1; transform: none; }
+  .line-in { animation: lineIn .35s ease both; } @keyframes lineIn { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+  .shimmer { height: 12px; border-radius: 6px; background: linear-gradient(90deg,#1C1C26 0%,#2C2C38 50%,#1C1C26 100%); background-size: 200% 100%; animation: sh 1.2s linear infinite; }
+  @keyframes sh { from { background-position: 200% 0 } to { background-position: -200% 0 } }
+  .spin { animation: rot 1s linear infinite; } @keyframes rot { to { transform: rotate(360deg) } }
+  :focus-visible { outline: 2px solid #7DD3FC; outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; } }
+</style>
+
+<div class="h-full flex items-center justify-center">
+  <main class="phone relative flex flex-col overflow-hidden rounded-[48px] border border-line bg-ink shadow-[0_30px_80px_rgba(0,0,0,.6)]">
+
+    <!-- Header -->
+    <header class="flex items-center gap-3 border-b border-line/70 bg-ink px-5 pb-3.5 pt-12">
+      <div class="flex h-10 w-10 flex-none items-center justify-center rounded-xl bg-panel ring-1 ring-line">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#7DD3FC" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></svg>
+      </div>
+      <div class="flex min-w-0 flex-1 flex-col">
+        <h1 class="font-display text-[20px] font-bold tracking-tight">OmniScribe AI</h1>
+        <p class="text-xs text-muted">Live meeting intelligence</p>
+      </div>
+      <div id="liveBadge" hidden class="flex items-center gap-1.5 rounded-full bg-rec/15 px-2.5 py-1.5 text-xs font-semibold text-[#FF6961]">
+        <span class="blink h-2 w-2 rounded-full bg-rec"></span>LIVE
+      </div>
+    </header>
+
+    <!-- Scrollable body -->
+    <div id="scroller" class="no-scrollbar relative flex flex-1 flex-col gap-5 overflow-y-auto px-5 pb-10 pt-5">
+
+      <section class="flex flex-col gap-2">
+        <label for="meeting" class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Meeting Name Context</label>
+        <input id="meeting" type="text" autocomplete="off" placeholder="e.g. Weekly Sales Sync"
+          class="h-12 w-full rounded-2xl border border-line bg-panel px-3.5 text-base font-medium text-fg placeholder:text-dim outline-none transition focus:border-sky focus:ring-4 focus:ring-sky/15">
+      </section>
+
+      <section class="flex flex-col divide-y divide-line rounded-2xl border border-line bg-panel">
+        <div class="flex items-center gap-3.5 px-4 py-3.5">
+          <div class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-raise">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B4B4C0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          </div>
+          <div class="flex min-w-0 flex-1 flex-col">
+            <span id="vaultLabel" class="text-[15px] font-semibold">Internal Vault Context</span>
+            <span id="vaultStatus" class="text-xs text-muted">ON · answers draw on company docs</span>
+          </div>
+          <button id="vaultSwitch" type="button" role="switch" aria-checked="true" aria-labelledby="vaultLabel" class="switch"><span class="knob"></span></button>
+        </div>
+        <div class="flex items-center gap-3.5 px-4 py-3.5">
+          <div class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-raise">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B4B4C0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+          </div>
+          <div class="flex min-w-0 flex-1 flex-col">
+            <span id="webLabel" class="text-[15px] font-semibold">Live Web Fallback</span>
+            <span id="webStatus" class="text-xs text-muted">ON · unanswered questions go to the web</span>
+          </div>
+          <button id="webSwitch" type="button" role="switch" aria-checked="true" aria-labelledby="webLabel" class="switch"><span class="knob"></span></button>
+        </div>
+      </section>
+
+      <!-- Recorder -->
+      <section class="flex flex-col items-center gap-3.5 rounded-[22px] border border-line/70 bg-[#101016] px-4 pb-5 pt-6">
+        <div id="recWrap" class="relative flex h-[148px] w-[148px] items-center justify-center">
+          <span class="ring"></span><span class="ring r2"></span><span class="ring r3"></span>
+          <button id="recBtn" type="button" aria-pressed="false" aria-label="Start live audio stream"
+            class="rec-btn relative z-10 flex h-[120px] w-[120px] items-center justify-center rounded-full bg-raise shadow-[inset_0_0_0_1.5px_#34343F,0_10px_30px_rgba(0,0,0,.45)]">
+            <svg id="micIcon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#F1F1F5" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+            <svg id="stopIcon" hidden width="38" height="38" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+          </button>
+        </div>
+        <div class="flex min-h-[52px] flex-col items-center gap-1.5 text-center">
+          <div id="idleText" class="flex flex-col items-center gap-1">
+            <span class="font-display text-[17px] font-semibold">Start Live Audio Stream</span>
+            <span class="text-[13px] text-muted">Tap to capture the meeting in real time</span>
+          </div>
+          <div id="recText" hidden class="flex flex-col items-center gap-1">
+            <div class="flex items-center gap-2.5">
+              <span class="font-display text-[17px] font-semibold text-[#FF6961]">Recording...</span>
+              <div class="bars flex h-[22px] items-center gap-[3px]" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+            </div>
+            <span class="text-[13px] text-muted"><span id="timer" class="font-mono tabular-nums">00:00</span> · tap to stop &amp; analyze</span>
+          </div>
+        </div>
+        <ol id="liveFeed" hidden class="flex w-full flex-col gap-2 rounded-xl bg-panel p-3 text-[13px] leading-snug" aria-live="polite"></ol>
+      </section>
+
+      <div class="flex items-center gap-3 text-xs font-semibold tracking-[.1em] text-dim">
+        <span class="h-px flex-1 bg-line"></span>OR<span class="h-px flex-1 bg-line"></span>
+      </div>
+
+      <!-- Upload -->
+      <label id="drop" for="fileInput"
+        class="flex min-h-[132px] cursor-pointer flex-col items-center justify-center gap-2 rounded-[18px] border-[1.5px] border-dashed border-[#3A3A48] bg-[#101016] p-5 text-center transition hover:border-[#5A5A6A] focus-within:border-sky">
+        <input id="fileInput" type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.mp4" class="sr-only">
+        <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-raise">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#7DD3FC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        </div>
+        <span class="text-[15px] font-semibold">Upload Call Recording</span>
+        <span id="dropHint" class="text-xs text-muted">Tap to browse, or drop an audio file · MP3, M4A, WAV (Max 25MB)</span>
+      </label>
+      <button id="sampleBtn" type="button" class="-mt-2 self-center rounded-lg px-3 py-2 text-[13px] font-medium text-sky hover:bg-sky/10">No file handy? Use a sample recording</button>
+
+      <!-- Error Notification Banner -->
+      <div id="errorBanner" hidden class="line-in flex items-start gap-3 rounded-[18px] border border-rec/40 bg-rec/10 p-4 text-[13px] text-fg">
+        <span class="text-base flex-none">⚠️</span>
+        <div class="flex-1 flex flex-col gap-0.5 min-w-0">
+          <span id="errorTitle" class="font-semibold text-[#FF6961]">Error</span>
+          <span id="errorMessage" class="text-slate-300 leading-snug break-words">Something went wrong.</span>
+        </div>
+        <button id="errorCloseBtn" type="button" aria-label="Dismiss error" class="text-dim hover:text-fg text-sm font-semibold p-1 -mr-1 -mt-1">✕</button>
+      </div>
+
+      <!-- Processing -->
+      <section id="processing" hidden class="line-in flex flex-col gap-3 rounded-[18px] border border-line bg-panel p-[18px]">
+        <div class="flex items-center gap-2.5 text-sm font-semibold">
+          <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7DD3FC" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9"/></svg>
+          <span id="procText">Transcribing…</span>
+        </div>
+        <div class="shimmer w-[92%]"></div><div class="shimmer w-[78%]"></div><div class="shimmer w-[85%]"></div>
+      </section>
+
+      <!-- Results (hidden until simulation completes) -->
+      <div id="results" class="results flex flex-col gap-3.5" aria-hidden="true">
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex min-w-0 flex-col">
+            <span class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Results</span>
+            <span id="resTitle" class="truncate font-display text-[17px] font-semibold">Untitled meeting</span>
+          </div>
+          <button id="clearBtn" type="button" class="h-11 flex-none rounded-xl border border-line bg-panel px-4 text-sm font-semibold hover:bg-raise">Clear</button>
+        </div>
+
+        <section class="flex flex-col gap-3 rounded-[18px] border border-line bg-panel p-[18px]">
+          <div class="flex items-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B4B4C0" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+            <h2 class="font-display text-[15px] font-semibold">Extracted Transcript</h2>
+            <span id="resSource" class="ml-auto truncate text-[11px] text-dim"></span>
+          </div>
+          <ol id="transcript" class="flex flex-col gap-3"></ol>
+        </section>
+
+        <section class="flex flex-col gap-3.5 rounded-[18px] border border-line bg-panel p-[18px]">
+          <div class="flex items-center gap-2">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7DD3FC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg>
+            <h2 class="font-display text-[15px] font-semibold">AI Intelligence Analysis &amp; Answers</h2>
+          </div>
+          <p id="summary" class="text-[13px] leading-relaxed text-[#D4D4DC]"></p>
+          <div class="flex flex-col gap-2">
+            <span class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Action items</span>
+            <ul id="actions" class="flex flex-col gap-1"></ul>
+          </div>
+          <div class="flex flex-col gap-2.5">
+            <span class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Detected questions · answers</span>
+            <div id="qa" class="flex flex-col gap-2.5"></div>
+          </div>
+          <p class="text-[11px] text-dim" id="resultsNotice">Live analysis powered by OmniScribe AI intelligence engine.</p>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+
+  // 1. Configurable Backend API Endpoint
+  var API_BASE_URL = window.OMNISCRIBE_API_URL || (
+    window.location.protocol === 'file:' 
+      ? 'http://localhost:8000' 
+      : (window.location.port === '8000' ? '' : 'http://localhost:8000')
+  );
+  var PROCESS_ENDPOINT = API_BASE_URL + '/api/process-meeting';
+
+  // 2. Application State
+  var state = {
+    vault: true,
+    web: true,
+    recording: false,
+    stopping: false,
+    lastTapAt: 0,
+    isProcessing: false,
+    seconds: 0,
+    timer: null,
+    mediaRecorder: null,
+    mediaStream: null
+  };
+
+  function fmt(s) {
+    var m = Math.floor(s / 60), r = s % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r;
+  }
+
+  function meetingName() {
+    return $('meeting').value.trim() || 'Untitled meeting';
+  }
+
+  // 3. User Feedback & Error Banner
+  function showError(title, message) {
+    $('errorTitle').textContent = title || 'Error';
+    $('errorMessage').textContent = message || 'An unexpected error occurred.';
+    $('errorBanner').hidden = false;
+    scrollTo($('errorBanner'));
+  }
+
+  function hideError() {
+    $('errorBanner').hidden = true;
+  }
+
+  $('errorCloseBtn').addEventListener('click', hideError);
+
+  // 4. Toggle Switches (Vault Context & Live Web Fallback)
+  function bindSwitch(btnId, statusId, key, onText, offText) {
+    $(btnId).addEventListener('click', function () {
+      state[key] = !state[key];
+      $(btnId).setAttribute('aria-checked', String(state[key]));
+      $(statusId).textContent = state[key] ? onText : offText;
+    });
+  }
+  bindSwitch('vaultSwitch', 'vaultStatus', 'vault', 'ON · answers draw on company docs', 'OFF · meeting audio only');
+  bindSwitch('webSwitch', 'webStatus', 'web', 'ON · unanswered questions go to the web', 'OFF · no internet lookups');
+
+  // 5. Dynamic MIME Type Detection for Browser & iOS Safari
+  function getSupportedAudioMimeType() {
+    if (typeof MediaRecorder === 'undefined') return '';
+    var types = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/aac',
+      'audio/ogg;codecs=opus',
+      'audio/wav'
+    ];
+    for (var i = 0; i < types.length; i++) {
+      if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(types[i])) {
+        return types[i];
+      }
+    }
+    return '';
+  }
+
+  // 6. Real Microphone Audio Recording
+  async function startRec() {
+    // Results stay visible until a new submission succeeds; starting a recording does not clear them
+    if (state.isProcessing || state.stopping) return;
+    hideError();
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError('Recording Unsupported', 'Live audio recording is not supported in this browser environment. Please use file upload instead.');
+      return;
+    }
+
+    try {
+      var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      state.mediaStream = stream;
+
+      var mimeType = getSupportedAudioMimeType();
+      var options = mimeType ? { mimeType: mimeType } : {};
+      // Each recorder keeps its own chunks, so a later recording can never mix into this one
+      var recorder = new MediaRecorder(stream, options);
+      var chunks = [];
+      state.mediaRecorder = recorder;
+
+      recorder.ondataavailable = function (e) {
+        if (e.data && e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
+
+      recorder.onstop = async function () {
+        state.stopping = false;
+        var actualMime = recorder.mimeType || mimeType || 'audio/webm';
+        var ext = 'webm';
+        if (actualMime.includes('mp4') || actualMime.includes('aac')) ext = 'm4a';
+        else if (actualMime.includes('ogg')) ext = 'ogg';
+        else if (actualMime.includes('wav')) ext = 'wav';
+        var audioBlob = new Blob(chunks, { type: actualMime });
+
+        if (audioBlob.size === 0) {
+          showError('Recording Empty', 'No audio data was captured by the microphone.');
+          return;
+        }
+        if (audioBlob.size > 25 * 1024 * 1024) {
+          showError('Recording Too Large', 'This recording exceeds the 25MB limit for transcription. Please record a shorter session.');
+          return;
+        }
+
+        var fileName = 'live-mic-' + Date.now() + '.' + ext;
+        await transmitPayload(audioBlob, fileName);
+      };
+
+      state.mediaRecorder.start(1000); // 1-second timeslices
+      state.recording = true;
+      state.seconds = 0;
+
+      // Update UI for recording active
+      $('recWrap').classList.add('is-rec');
+      $('recBtn').setAttribute('aria-pressed', 'true');
+      $('recBtn').setAttribute('aria-label', 'Stop live audio stream');
+      $('micIcon').hidden = true;
+      $('stopIcon').hidden = false;
+      $('idleText').hidden = true;
+      $('recText').hidden = false;
+      $('liveBadge').hidden = false;
+      $('timer').textContent = '00:00';
+      $('liveFeed').innerHTML = '';
+      $('liveFeed').hidden = false;
+
+      var feedItem = document.createElement('li');
+      feedItem.className = 'line-in flex gap-2 text-sky';
+      feedItem.textContent = '● Microphone active. Capturing audio stream…';
+      $('liveFeed').appendChild(feedItem);
+
+      state.timer = setInterval(function () {
+        state.seconds++;
+        $('timer').textContent = fmt(state.seconds);
+      }, 1000);
+
+    } catch (err) {
+      console.error('Microphone access error:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        showError('Microphone Access Denied', 'Please allow microphone permissions in your browser or device settings to enable live recording.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        showError('No Microphone Found', 'No input microphone was detected on this device.');
+      } else {
+        showError('Microphone Error', err.message || 'Could not start audio recording.');
+      }
+      resetRecordingUI();
+    }
+  }
+
+  function stopRec() {
+    if (!state.recording) return;
+    state.recording = false;
+    // Blocks a second tap from starting a new recording until this one's onstop has run
+    state.stopping = true;
+    clearInterval(state.timer);
+
+    resetRecordingUI();
+
+    if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') {
+      try {
+        state.mediaRecorder.stop();
+      } catch (e) {
+        console.error('Error stopping MediaRecorder:', e);
+        state.stopping = false;
+      }
+    } else {
+      state.stopping = false;
+    }
+
+    if (state.mediaStream) {
+      state.mediaStream.getTracks().forEach(function (t) { t.stop(); });
+      state.mediaStream = null;
+    }
+  }
+
+  function resetRecordingUI() {
+    $('recWrap').classList.remove('is-rec');
+    $('recBtn').setAttribute('aria-pressed', 'false');
+    $('recBtn').setAttribute('aria-label', 'Start live audio stream');
+    $('micIcon').hidden = false;
+    $('stopIcon').hidden = true;
+    $('idleText').hidden = false;
+    $('recText').hidden = true;
+    $('liveBadge').hidden = true;
+    $('liveFeed').hidden = true;
+  }
+
+  $('recBtn').addEventListener('click', function () {
+    // Ignore taps within 600 ms of the previous one, so a double-tap cannot stop and immediately restart
+    var now = Date.now();
+    if (now - state.lastTapAt < 600) return;
+    state.lastTapAt = now;
+    state.recording ? stopRec() : startRec();
+  });
+
+  // 7. Real File Upload & Drag-and-Drop
+  var drop = $('drop');
+  drop.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    drop.classList.add('!border-sky', '!bg-sky/10');
+    $('dropHint').textContent = 'Release to upload';
+  });
+  drop.addEventListener('dragleave', resetDrop);
+  drop.addEventListener('drop', function (e) {
+    e.preventDefault();
+    resetDrop();
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleSelectedFile(f);
+  });
+  function resetDrop() {
+    drop.classList.remove('!border-sky', '!bg-sky/10');
+    $('dropHint').textContent = 'Tap to browse, or drop an audio file · MP3, M4A, WAV';
+  }
+
+  $('fileInput').addEventListener('change', function (e) {
+    var f = e.target.files && e.target.files[0];
+    if (f) handleSelectedFile(f);
+    e.target.value = '';
+  });
+
+  function handleSelectedFile(file) {
+    if (!file) return;
+    hideError();
+
+    // Size limit check (max 25 MB Groq free-tier limit)
+    if (file.size > 25 * 1024 * 1024) {
+      showError('File Too Large', 'The selected file exceeds the 25MB limit. Please choose a recording under 25MB.');
+      return;
+    }
+    if (file.size === 0) {
+      showError('Empty File', 'The selected audio file contains no data.');
+      return;
+    }
+
+    transmitPayload(file, file.name);
+  }
+
+  // 8. Sample Recording Generator (Produces a minimal valid 1-second 8kHz WAV audio binary)
+  function createSyntheticAudioBlob() {
+    var sampleRate = 8000;
+    var numSamples = sampleRate;
+    var buffer = new ArrayBuffer(44 + numSamples * 2);
+    var view = new DataView(buffer);
+    function writeString(offset, string) {
+      for (var i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
+    }
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + numSamples * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, 'data');
+    view.setUint32(40, numSamples * 2, true);
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  $('sampleBtn').addEventListener('click', function () {
+    // Stopping a live recording submits it via onstop, so the sample must not be sent on top of it
+    if (state.recording || state.stopping || state.isProcessing) return;
+    var sampleBlob = createSyntheticAudioBlob();
+    transmitPayload(sampleBlob, 'sample-client-call.wav');
+  });
+
+  // 9. Backend Payload Transmission & Communication Flow
+  async function transmitPayload(fileOrBlob, fileName) {
+    if (state.isProcessing) return;
+    state.isProcessing = true;
+    hideError();
+    // Previous results stay on screen until this request succeeds, so a failure never erases them
+
+    $('procText').textContent = 'Transcribing & analyzing ' + fileName + '…';
+    $('processing').hidden = false;
+    scrollTo($('processing'));
+
+    var formData = new FormData();
+    formData.append('file', fileOrBlob, fileName);
+    formData.append('meeting_name', meetingName());
+    formData.append('is_internal_context', String(state.vault));
+    formData.append('is_web_fallback', String(state.web));
+
+    try {
+      var response = await fetch(PROCESS_ENDPOINT, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        // Read the body once: calling json() and then text() on the same response loses the server message
+        var rawError = await response.text();
+        var errDetail = 'HTTP error ' + response.status;
+        try {
+          var errJson = JSON.parse(rawError);
+          if (errJson && typeof errJson.detail === 'string' && errJson.detail) errDetail = errJson.detail;
+        } catch (_) {
+          if (rawError) errDetail = rawError;
+        }
+
+        if (response.status === 503) {
+          showError('Service Unavailable', errDetail);
+        } else if (response.status === 401) {
+          showError('Authentication Failed', errDetail);
+        } else if (response.status === 429) {
+          showError('Rate Limit Reached', errDetail);
+        } else if (response.status === 413) {
+          showError('File Too Large', errDetail);
+        } else if (response.status === 400 || response.status === 422) {
+          showError('Invalid Request', errDetail);
+        } else {
+          showError('Processing Error', errDetail);
+        }
+        return;
+      }
+
+      var data;
+      try {
+        data = await response.json();
+      } catch (_) {
+        showError('Unexpected Response', 'The server sent a response that could not be read. Your previous results are still shown.');
+        return;
+      }
+      if (!data || data.success !== true) {
+        showError('Unexpected Response', 'The server did not return a transcript. Your previous results are still shown.');
+        return;
+      }
+
+      $('resSource').textContent = fileName;
+      renderBackendResults(data);
+
+      $('results').classList.add('open');
+      $('results').setAttribute('aria-hidden', 'false');
+      setTimeout(function () { scrollTo($('results')); }, 80);
+
+    } catch (err) {
+      console.error('API transmission failure:', err);
+      showError(
+        'Backend Connection Failed',
+        'Could not reach server at ' + API_BASE_URL + '. Please confirm that the FastAPI backend is running (uvicorn backend.main:app --port 8000).'
+      );
+    } finally {
+      state.isProcessing = false;
+      $('processing').hidden = true;
+    }
+  }
+
+  // 10. Safe DOM Rendering for Results
+  function renderBackendResults(data) {
+    $('resTitle').textContent = data.meeting_name || meetingName();
+    $('summary').textContent = data.summary || 'Summary unavailable.';
+
+    // The backend marks placeholder analysis with a [MOCK] prefix; the notice must not claim live AI analysis
+    var isMockAnalysis = typeof data.summary === 'string' && data.summary.indexOf('[MOCK') === 0;
+    $('resultsNotice').textContent = isMockAnalysis
+      ? 'Transcript is real speech-to-text from Groq Whisper. Summary, action items and answers are mock placeholders.'
+      : 'Live analysis powered by OmniScribe AI intelligence engine.';
+
+    // Extracted Transcript Segment
+    var transcriptOl = $('transcript');
+    transcriptOl.innerHTML = '';
+    var li = document.createElement('li');
+    li.className = 'flex gap-2.5 text-[13px] leading-relaxed';
+    var timeSpan = document.createElement('span');
+    timeSpan.className = 'w-10 flex-none font-mono text-[11px] text-dim pt-0.5 tabular-nums';
+    timeSpan.textContent = '00:01';
+    var contentDiv = document.createElement('div');
+    contentDiv.className = 'flex flex-col';
+    var whoSpan = document.createElement('span');
+    whoSpan.className = 'font-semibold text-sky';
+    whoSpan.textContent = 'Audio Stream';
+    var textSpan = document.createElement('span');
+    textSpan.className = 'text-[#D4D4DC]';
+    textSpan.textContent = data.transcript_segment || 'No transcript detected.';
+    contentDiv.appendChild(whoSpan);
+    contentDiv.appendChild(textSpan);
+    li.appendChild(timeSpan);
+    li.appendChild(contentDiv);
+    transcriptOl.appendChild(li);
+
+    // Action Items
+    var actionsUl = $('actions');
+    actionsUl.innerHTML = '';
+    var actionList = Array.isArray(data.action_items) ? data.action_items : [];
+    if (actionList.length === 0) {
+      var emptyLi = document.createElement('li');
+      emptyLi.className = 'text-[13px] text-muted italic py-1';
+      emptyLi.textContent = 'No immediate action items identified.';
+      actionsUl.appendChild(emptyLi);
+    } else {
+      actionList.forEach(function (act, i) {
+        var actLi = document.createElement('li');
+        var label = document.createElement('label');
+        label.className = 'flex cursor-pointer items-start gap-2.5 rounded-lg py-1 text-[13px] leading-snug';
+        var chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.id = 'act_' + i;
+        chk.className = 'mt-0.5 h-[18px] w-[18px] flex-none accent-[#30D158]';
+        var txt = document.createElement('span');
+        txt.className = 'text-[#E4E4EA]';
+        txt.textContent = act;
+        label.appendChild(chk);
+        label.appendChild(txt);
+        actLi.appendChild(label);
+        actionsUl.appendChild(actLi);
+      });
+    }
+
+    // Detected Questions & Answers
+    var qaContainer = $('qa');
+    qaContainer.innerHTML = '';
+    var qaList = Array.isArray(data.qa_items) ? data.qa_items : [];
+    if (qaList.length === 0) {
+      var emptyP = document.createElement('p');
+      emptyP.className = 'text-[13px] text-muted italic py-1';
+      emptyP.textContent = 'No explicit questions detected in this session.';
+      qaContainer.appendChild(emptyP);
+    } else {
+      qaList.forEach(function (item) {
+        var card = document.createElement('div');
+        card.className = 'flex flex-col gap-1.5 rounded-xl bg-raise p-3';
+
+        var headerRow = document.createElement('div');
+        headerRow.className = 'flex items-start justify-between gap-2';
+
+        var questionSpan = document.createElement('span');
+        questionSpan.className = 'text-[13px] font-semibold text-fg';
+        questionSpan.textContent = item.question || '';
+
+        var badge = createBadgeElement(item.source);
+
+        headerRow.appendChild(questionSpan);
+        headerRow.appendChild(badge);
+
+        var answerSpan = document.createElement('span');
+        answerSpan.className = 'text-[13px] leading-relaxed text-[#C8C8D2]';
+        answerSpan.textContent = item.answer || '';
+
+        card.appendChild(headerRow);
+        card.appendChild(answerSpan);
+        qaContainer.appendChild(card);
+      });
+    }
+  }
+
+  function createBadgeElement(source) {
+    var kind = (source || 'none').toLowerCase();
+    var config = {
+      vault: { text: 'Internal Vault', cls: 'bg-ok/15 text-[#7EE2A0]' },
+      web: { text: 'Live Web', cls: 'bg-web/15 text-web' },
+      none: { text: 'Unanswered', cls: 'bg-raise text-muted' }
+    }[kind] || { text: 'Unanswered', cls: 'bg-raise text-muted' };
+
+    var span = document.createElement('span');
+    span.className = 'inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold flex-none ' + config.cls;
+    span.textContent = config.text;
+    return span;
+  }
+
+  function hideResults() {
+    $('results').classList.remove('open');
+    $('results').setAttribute('aria-hidden', 'true');
+  }
+
+  function scrollTo(el) {
+    var s = $('scroller');
+    if (el && s) s.scrollTo({ top: el.offsetTop - 12, behavior: 'smooth' });
+  }
+
+  $('clearBtn').addEventListener('click', function () {
+    hideResults();
+    hideError();
+    $('scroller').scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+})();
+</script>
+
+</body></html>

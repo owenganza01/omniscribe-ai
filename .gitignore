@@ -1,0 +1,50 @@
+# Python Bytecode and Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Internal Vault Data (Protect confidential company transcripts)
+vault/*
+!vault/.gitkeep
+backend/vault/*
+!backend/vault/.gitkeep
+# Legacy simulated transcripts moved out of the Vault (kept, not deleted)
+backend/test-data/
+
+# Temporary and Uploaded Audio/Video Files
+*.wav
+*.mp3
+*.m4a
+*.webm
+*.mp4
+*.ogg
+temp/
+temp_audio/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE and Editor Files
+.idea/
+.vscode/
+*.swp
+*.swo
