@@ -1,6 +1,8 @@
 # OmniScribe AI
 
-OmniScribe AI is a mobile-first, context-aware meeting intelligence assistant. It helps teams capture live meeting audio or uploaded call recordings, transcribes them into readable logs, retains company knowledge in an internal Vault, and uses Anthropic Claude to extract summaries, action items, and answers to questions (with automatic public web fallback when internal answers are insufficient).
+OmniScribe AI is a mobile-first, context-aware meeting intelligence assistant. It helps teams capture live meeting audio or uploaded call recordings and transcribes them into readable logs using real speech-to-text (Groq Whisper). It also keeps company knowledge in an internal Vault.
+
+The intended design uses Anthropic Claude to extract summaries, action items, and answers, with public web fallback when internal answers are insufficient. **That part is currently mocked.** See [AI Analysis](#ai-analysis-currently-mocked).
 
 ---
 
@@ -41,13 +43,17 @@ omniscribe-ai/
    cd omniscribe-ai
    ```
 
-2. **Create and activate a virtual environment**:
-   - On Windows (PowerShell):
+2. **Create and activate a virtual environment**. Run each command on its own line:
+   - Windows (PowerShell):
      ```powershell
      python -m venv venv
      .\venv\Scripts\Activate.ps1
      ```
-   - On macOS / Linux:
+     If PowerShell reports that scripts are disabled, run this once and then activate again:
+     ```powershell
+     Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+     ```
+   - macOS / Linux:
      ```bash
      python3 -m venv venv
      source venv/bin/activate
@@ -55,7 +61,7 @@ omniscribe-ai/
 
 3. **Install dependencies**:
    ```bash
-   pip install -r backend/requirements.txt
+   python -m pip install -r backend/requirements.txt
    ```
 
 4. **Set up environment variables**:
@@ -100,6 +106,8 @@ The frontend is a lightweight, zero-build client styled with Tailwind CSS.
 
 Recordings are transcribed by `whisper-large-v3-turbo` through Groq's free API tier. The implementation lives in `backend/transcription.py`, and `POST /api/process-meeting` calls it.
 
+**Live status:** A real spoken recording was transcribed through the app using Groq. The returned transcript matched the spoken sentence and was displayed in the results view. The transcript saved to the Vault is that real Groq output.
+
 **Supported formats:** WebM, M4A, MP3, WAV, MP4, OGG (also FLAC, MPEG, MPGA). The file header is checked, not only the extension. Chrome/Edge (WebM), Firefox (WebM or OGG), and iOS Safari (MP4/M4A) recordings are all accepted.
 
 **Limits:**
@@ -124,15 +132,30 @@ python backend/test_backend.py
 
 ## AI Analysis (Currently Mocked)
 
-Summaries, action items, and Q&A come from a **placeholder** while `MOCK_AI_RESPONSE=true`. The transcript is real Groq output. Everything else is labelled `[MOCK]`. The Anthropic integration is kept in `backend/main.py` for later replacement with a free hosted model. It is not used unless `MOCK_AI_RESPONSE` is set to `false`, and it then requires paid Anthropic credits.
+| Output | Status |
+|---|---|
+| Transcript (`transcript_segment`) | **Real.** Speech-to-text from Groq Whisper Large V3 Turbo. |
+| Summary | **Mocked.** Fixed placeholder text, labelled `[MOCK AI ANALYSIS]`. |
+| Action items | **Mocked.** Fixed placeholder items, labelled `[MOCK]`. |
+| Q&A answers | **Mocked.** Fixed placeholder answers, labelled `[MOCK]`. |
+
+While `MOCK_AI_RESPONSE=true`, no Anthropic request is made. The placeholder analysis does not read the recording. Its text is not derived from the transcript.
+
+No free hosted AI model has been selected or integrated yet. The Anthropic integration in `backend/main.py` remains in place until a free hosted model is chosen and connected. It runs only when `MOCK_AI_RESPONSE` is set to `false`, and it then requires paid Anthropic credits. Do not turn it on without a paid plan.
 
 ---
 
 ## Project Milestones
 
 - [x] **Milestone 1**: Repository Cleanup & Standard Structure (Preserved official UI, organized `backend/` and `frontend/`, created dependency manifests and security ignores).
-- [ ] **Milestone 2**: Backend Repair & API Standardization (Fix web fallback query, add dotenv loader, accept web search toggle, structure Claude JSON responses).
+- [x] **Milestone 2**: Backend Repair & API Standardization. Complete, verified by 58 automated tests with mocked Claude, search, and transport clients (`python backend/test_backend.py`).
+  - **Public web fallback:** DuckDuckGo instant answer, related topics, and HTML results. When nothing usable is found, the search returns no result rather than a message, and no refinement call is made.
+  - **`.env` loading:** `backend/main.py` loads `.env` from the project root at startup, so `GROQ_API_KEY` and `MOCK_AI_RESPONSE` are read from it.
+  - **Web-search toggle:** when disabled, no search and no refinement run, even if the model requests one.
+  - **Structured Claude JSON:** responses are parsed into summary, action items, and Q&A. Malformed or non-object JSON falls back safely. A refinement replaces the initial analysis only when it is a valid object with the required fields. Otherwise the initial analysis is kept.
+  - **Source labels:** an unsupported `web` or `vault` label is downgraded to `none`. `web` is kept only when a search result was used in a valid refinement, and `vault` only when vault context was enabled.
+  - **Limitations:** real Claude responses have not been tested, because real calls are paid, so all Claude behavior was checked with stubbed clients. The related-topic and HTML search paths, and `.env` loading, are verified by manual checks rather than in the automated suite. Source labels are checked against the request settings, not against the evidence the model actually used, so a `vault` label can still be wrong if the model did not use the vault content.
 - [ ] **Milestone 3**: Frontend & Backend Integration (Connect real Web Audio `MediaRecorder` and file uploads to backend API).
-- [ ] **Milestone 4**: Speech-to-Text Transcription Integration. Phase B implemented: Groq integration, format and size validation, error handling, and mocked tests pass. Live Groq test is pending approval.
-- [ ] **Milestone 5**: Enhanced Vault Search across past meetings.
-- [ ] **Milestone 6**: End-to-End Verification and Deployment.
+- [x] **Milestone 4**: Speech-to-Text Transcription Integration. Groq Whisper integration, format and size validation, error handling, frontend results display, automated mocked tests (58 backend, 8 browser), and a live transcription of a real recording are complete. Not included: real AI analysis (still mocked) and recordings longer than the 25 MB limit.
+- [ ] **Milestone 5**: Enhanced Vault Search across past meetings. Not started.
+- [ ] **Milestone 6**: End-to-End Verification and Deployment. Not started. The app runs only on a local computer. Nothing has been deployed. Remaining work: a full end-to-end check across browsers and devices, choosing a free hosting provider, production configuration (API URL, CORS, secrets), deployment, and selecting and integrating a free hosted model to replace the mocked AI analysis.

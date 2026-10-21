@@ -125,16 +125,17 @@ def save_and_read_vault_context(sanitized_name: str, transcript_segment: str) ->
     with open(target_file, "r", encoding="utf-8") as f:
         return f.read()
 
-async def query_public_internet_fallback(search_query: str) -> str:
+async def query_public_internet_fallback(search_query: str) -> Optional[str]:
     """
     Asynchronous fallback to query public web information when internal context
     is insufficient and web fallback is enabled.
     Attempts DuckDuckGo Instant Answer API first, falling back to HTML snippets.
-    Never fabricates search results.
+    Returns usable result text, or None when there is no usable result (empty query, no results,
+    or a network or parsing failure). Never fabricates search results and never returns a failure message.
     """
     clean_query = search_query.strip()
     if not clean_query:
-        return "[Web Search]: No search query provided."
+        return None
 
     encoded_query = urllib.parse.quote_plus(clean_query)
     headers = {
@@ -178,11 +179,12 @@ async def query_public_internet_fallback(search_query: str) -> str:
         except Exception:
             pass
 
-    return f"[Web Search]: No public search results found for '{clean_query}'."
+    return None
 
-def parse_claude_json_response(raw_text: str) -> Dict[str, Any]:
+def parse_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
     """
-    Safely parses structured JSON from Claude's response, handling code fence wrappers.
+    Returns the JSON object in Claude's response (handling code fence wrappers), or None if there is none.
+    Valid JSON that is not an object (list, string, number, boolean, null) is rejected.
     """
     cleaned = raw_text.strip()
     # Strip markdown code blocks if present
@@ -194,17 +196,39 @@ def parse_claude_json_response(raw_text: str) -> Dict[str, Any]:
         cleaned = cleaned[:-3]
     cleaned = cleaned.strip()
 
-    # Try direct JSON parsing
+    # Only a JSON object is a valid analysis. Lists, strings, numbers, booleans and null fall through.
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
     except Exception:
         # Fallback regex search for JSON object inside text
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(0))
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    return parsed
             except Exception:
                 pass
+    return None
+
+def is_usable_analysis(parsed: Optional[Dict[str, Any]]) -> bool:
+    """True when a parsed object has the fields the response needs: a string summary and list action_items and qa_items."""
+    return (
+        isinstance(parsed, dict)
+        and isinstance(parsed.get("summary"), str)
+        and isinstance(parsed.get("action_items"), list)
+        and isinstance(parsed.get("qa_items"), list)
+    )
+
+def parse_claude_json_response(raw_text: str) -> Dict[str, Any]:
+    """
+    Safely parses structured JSON from Claude's response, falling back to a safe default structure.
+    """
+    parsed = parse_json_object(raw_text)
+    if parsed is not None:
+        return parsed
 
     # Safe fallback structure if model output failed to format properly
     return {
@@ -212,6 +236,31 @@ def parse_claude_json_response(raw_text: str) -> Dict[str, Any]:
         "action_items": [],
         "qa_items": []
     }
+
+NEED_SEARCH_FLAG = "[NEED_EXTERNAL_SEARCH:"
+MAX_SEARCH_QUERY_CHARS = 200
+
+def extract_search_query(text: str) -> str:
+    """
+    Returns the query inside a [NEED_EXTERNAL_SEARCH: ...] flag, or "" if the flag is absent or malformed.
+    A valid flag closes with ']' on the same line and contains no '[' (which would mean a JSON array
+    or other bracketed text follows an unterminated flag). Queries over MAX_SEARCH_QUERY_CHARS are
+    rejected whole, never truncated. A malformed flag returns "" so no partial query is sent to web search.
+    """
+    start = text.find(NEED_SEARCH_FLAG)
+    if start == -1:
+        return ""
+    start += len(NEED_SEARCH_FLAG)
+    line_end = text.find("\n", start)
+    if line_end == -1:
+        line_end = len(text)
+    end = text.find("]", start, line_end)
+    if end == -1:
+        return ""
+    query = text[start:end].strip()
+    if "[" in query or len(query) > MAX_SEARCH_QUERY_CHARS:
+        return ""
+    return query
 
 # -----------------------------------------------------------------------------
 # 5. API Endpoints
@@ -290,14 +339,15 @@ async def process_meeting(
     if MOCK_AI_RESPONSE:
         # Placeholder analysis for development testing. The transcript above is real Groq output;
         # everything below is fixed text and is labelled [MOCK] so it is never mistaken for AI output.
-        q1_source = "vault" if is_internal_context else ("web" if is_web_fallback else "none")
+        # Mock answers state that no lookup happened, so they must not carry a vault or web source label
+        q1_source = "none"
         q1_answer = (
             "[MOCK] Placeholder answer. No internal vault lookup was performed."
             if is_internal_context
             else ("[MOCK] Placeholder answer. No public web lookup was performed." if is_web_fallback
                   else "Internal vault context and web search fallback are both disabled.")
         )
-        q2_source = "web" if is_web_fallback else "none"
+        q2_source = "none"
         q2_answer = (
             "[MOCK] Placeholder answer. No public web lookup was performed."
             if is_web_fallback
@@ -394,16 +444,19 @@ Do not include commentary outside the JSON object.
         )
 
     # 6. Execute Live Web Fallback if requested by Claude and enabled by user
-    if is_web_fallback and "[NEED_EXTERNAL_SEARCH:" in ai_response_text:
+    # Set only when a search returned results and the refinement passed validation (the only web evidence)
+    web_refined = False
+    if is_web_fallback and NEED_SEARCH_FLAG in ai_response_text:
         try:
-            start_idx = ai_response_text.find("[NEED_EXTERNAL_SEARCH:") + len("[NEED_EXTERNAL_SEARCH:")
-            end_idx = ai_response_text.find("]", start_idx)
-            search_query = ai_response_text[start_idx:end_idx].strip()
+            # Malformed or unterminated flags yield "" and are skipped, keeping the initial analysis
+            search_query = extract_search_query(ai_response_text)
 
             if search_query:
                 web_data = await query_public_internet_fallback(search_query)
 
-                refinement_prompt = f"""
+                # No usable public result: skip refinement so no failure is presented as web evidence
+                if web_data:
+                    refinement_prompt = f"""
 You requested external web search data for query: '{search_query}'.
 Here is the live public web result:
 {web_data}
@@ -412,16 +465,20 @@ Incorporate this data to answer the questions that required outside knowledge.
 Set source to "web" for questions answered using this web result.
 Return strictly the updated JSON matching the required schema.
 """
-                refined_message = client.messages.create(
-                    model=ANTHROPIC_MODEL,
-                    max_tokens=1500,
-                    messages=[
-                        {"role": "user", "content": routing_prompt},
-                        {"role": "assistant", "content": ai_response_text},
-                        {"role": "user", "content": refinement_prompt}
-                    ]
-                )
-                ai_response_text = refined_message.content[0].text
+                    refined_message = client.messages.create(
+                        model=ANTHROPIC_MODEL,
+                        max_tokens=1500,
+                        messages=[
+                            {"role": "user", "content": routing_prompt},
+                            {"role": "assistant", "content": ai_response_text},
+                            {"role": "user", "content": refinement_prompt}
+                        ]
+                    )
+                    refined_text = refined_message.content[0].text
+                    # A malformed or non-object refinement keeps the initial analysis instead of erasing it
+                    if is_usable_analysis(parse_json_object(refined_text)):
+                        ai_response_text = refined_text
+                        web_refined = True
         except Exception:
             # If refinement slips, keep initial output
             pass
@@ -429,16 +486,30 @@ Return strictly the updated JSON matching the required schema.
     # 7. Parse and Validate Output Structure
     parsed_analysis = parse_claude_json_response(ai_response_text)
 
-    summary = parsed_analysis.get("summary", "Meeting segment processed successfully.")
-    raw_action_items = parsed_analysis.get("action_items", [])
+    # Wrong field types fall back to safe defaults instead of raising a 500
+    summary = parsed_analysis.get("summary")
+    if not isinstance(summary, str):
+        summary = "Meeting segment processed successfully."
+
+    raw_action_items = parsed_analysis.get("action_items")
+    if not isinstance(raw_action_items, list):
+        raw_action_items = []
     action_items = [str(item) for item in raw_action_items if item]
 
-    raw_qa_items = parsed_analysis.get("qa_items", [])
+    raw_qa_items = parsed_analysis.get("qa_items")
+    if not isinstance(raw_qa_items, list):
+        raw_qa_items = []
     qa_items: List[QAItem] = []
     for item in raw_qa_items:
         if isinstance(item, dict) and "question" in item and "answer" in item:
-            source = item.get("source", "none").lower()
+            source = item.get("source", "none")
+            source = source.lower() if isinstance(source, str) else "none"
             if source not in ("vault", "web", "none"):
+                source = "none"
+            # Only report a source that was actually used. The model's label alone is not evidence.
+            if source == "web" and not web_refined:
+                source = "none"
+            if source == "vault" and not is_internal_context:
                 source = "none"
             qa_items.append(
                 QAItem(
