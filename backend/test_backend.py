@@ -1127,6 +1127,264 @@ def test_full_recording_request_is_unchanged():
     assert form_field(seen[0], "prompt") is None
     print("  [PASS] test_full_recording_request_is_unchanged (process-meeting still sends the same Groq request)")
 
+# -----------------------------------------------------------------------------
+# Analyze an existing transcript: /api/analyze-transcript (Milestone 3.2). No Groq or Anthropic calls.
+# -----------------------------------------------------------------------------
+from backend.main import MAX_TRANSCRIPT_CHARS, MAX_ANALYZE_BODY_BYTES, MAX_MEETING_NAME_CHARS
+
+LIVE_TRANSCRIPT = "Hello team, let's start the review. The launch moves to Friday. Can someone update the client?"
+
+@contextmanager
+def no_transcription_allowed():
+    """Fails the test if either Groq transcription path is used. Uses a placeholder key as a second guard."""
+    calls = []
+    originals = (bmain.transcribe_audio_groq, bmain.transcribe_segment_groq)
+
+    async def forbidden(*args, **kwargs):
+        calls.append("groq")
+        raise AssertionError("analyze-transcript must never call Groq")
+
+    bmain.transcribe_audio_groq = forbidden
+    bmain.transcribe_segment_groq = forbidden
+    try:
+        with groq_key(PLACEHOLDER_GROQ_KEY):
+            yield calls
+    finally:
+        bmain.transcribe_audio_groq, bmain.transcribe_segment_groq = originals
+
+@contextmanager
+def patched(name, replacement):
+    original = getattr(bmain, name)
+    setattr(bmain, name, replacement)
+    try:
+        yield
+    finally:
+        setattr(bmain, name, original)
+
+def post_analyze(body=None, raw=None):
+    if raw is not None:
+        return client.post("/api/analyze-transcript", content=raw, headers={"Content-Type": "application/json"})
+    return client.post("/api/analyze-transcript", json=body)
+
+def assert_api_error(response, status_code, code, retryable=None):
+    assert response.status_code == status_code, f"expected {status_code}, got {response.status_code}: {response.text}"
+    body = response.json()
+    assert body["success"] is False and body["error"]["code"] == code, body
+    assert set(body["error"].keys()) == {"code", "message", "retry_after_seconds", "retryable"}
+    assert body["error"]["retry_after_seconds"] is None
+    if retryable is not None:
+        assert body["error"]["retryable"] is retryable
+    assert "Traceback" not in response.text
+    return body
+
+def test_analyze_success():
+    with isolated_vault(), mock_mode(True), no_transcription_allowed() as groq_calls:
+        response = post_analyze({"transcript": f"  {LIVE_TRANSCRIPT}  ", "meeting_name": "Launch Sync",
+                                 "is_internal_context": False, "is_web_fallback": True})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True and body["meeting_name"] == "Launch Sync"
+    assert body["transcript_segment"] == LIVE_TRANSCRIPT, "transcript is returned trimmed and otherwise unchanged"
+    assert groq_calls == []
+    print("  [PASS] test_analyze_success")
+
+def test_analyze_matches_process_meeting_response():
+    async def fake_stt(filename, audio_bytes):
+        return LIVE_TRANSCRIPT
+
+    form = {"meeting_name": "Same Shape", "is_internal_context": "false", "is_web_fallback": "true"}
+    with isolated_vault(), mock_mode(True), stubbed_transcription(fake_stt):
+        from_audio = client.post("/api/process-meeting", data=form,
+                                 files={"file": ("m.wav", io.BytesIO(make_valid_wav_bytes()), "audio/wav")}).json()
+    with isolated_vault(), mock_mode(True), no_transcription_allowed():
+        from_text = post_analyze({"transcript": LIVE_TRANSCRIPT, "meeting_name": "Same Shape",
+                                  "is_internal_context": False, "is_web_fallback": True}).json()
+    assert set(from_text.keys()) == EXPECTED_RESPONSE_KEYS
+    assert from_text == from_audio, "same transcript and settings must give the identical response"
+    print("  [PASS] test_analyze_matches_process_meeting_response (identical body)")
+
+def test_analyze_defaults_and_untitled_name():
+    with isolated_vault() as vault, mock_mode(True), no_transcription_allowed():
+        body = post_analyze({"transcript": LIVE_TRANSCRIPT}).json()
+        assert list(vault.iterdir()) == [], "Vault saving must default to OFF"
+    assert body["meeting_name"] == "Untitled meeting"
+    assert body["qa_items"][1]["answer"].startswith("[MOCK]"), "web fallback defaults to ON (mock wording)"
+    print("  [PASS] test_analyze_defaults_and_untitled_name (Vault off, web on, Untitled meeting)")
+
+def test_analyze_rejects_empty_transcript():
+    for transcript in ["", "   \n\t  "]:
+        assert_api_error(post_analyze({"transcript": transcript}), 400, "EMPTY_TRANSCRIPT", retryable=False)
+    assert_api_error(post_analyze({"meeting_name": "No transcript"}), 400, "INVALID_REQUEST")
+    print("  [PASS] test_analyze_rejects_empty_transcript")
+
+def test_analyze_rejects_oversized_transcript():
+    with isolated_vault() as vault, mock_mode(True):
+        at_limit = post_analyze({"transcript": "a" * MAX_TRANSCRIPT_CHARS})
+        too_long = post_analyze({"transcript": "a" * (MAX_TRANSCRIPT_CHARS + 1), "is_internal_context": True})
+        huge_body = post_analyze(raw=b'{"transcript": "' + b"a" * (MAX_ANALYZE_BODY_BYTES + 10) + b'"}')
+        assert list(vault.iterdir()) == [], "a rejected transcript must not reach the Vault"
+    assert at_limit.status_code == 200
+    body = assert_api_error(too_long, 413, "TRANSCRIPT_TOO_LARGE", retryable=False)
+    assert "aaaa" not in body["error"]["message"], "transcript text must not be echoed"
+    assert_api_error(huge_body, 413, "TRANSCRIPT_TOO_LARGE")
+    print("  [PASS] test_analyze_rejects_oversized_transcript (200,000 characters accepted, more rejected)")
+
+def test_analyze_rejects_invalid_meeting_name():
+    cases = [123, "x" * (MAX_MEETING_NAME_CHARS + 1), "Sync\x00name", "Line\nbreak"]
+    with isolated_vault() as vault, mock_mode(True):
+        for name in cases:
+            assert_api_error(post_analyze({"transcript": LIVE_TRANSCRIPT, "meeting_name": name, "is_internal_context": True}),
+                             400, "INVALID_MEETING_NAME", retryable=False)
+        assert list(vault.iterdir()) == []
+        # Names made only of symbols are accepted and filed as untitled, exactly like /api/process-meeting
+        ok = post_analyze({"transcript": LIVE_TRANSCRIPT, "meeting_name": "???", "is_internal_context": True})
+        assert ok.status_code == 200 and ok.json()["meeting_name"] == "???"
+        assert (vault / "untitled-meeting.txt").exists()
+    print("  [PASS] test_analyze_rejects_invalid_meeting_name (type, length, control characters)")
+
+def test_analyze_vault_on_saves_exactly_once():
+    writes = []
+    original = bmain.save_and_read_vault_context
+
+    def counting(name, text):
+        writes.append(name)
+        return original(name, text)
+
+    with isolated_vault() as vault, mock_mode(True), no_transcription_allowed(), \
+            patched("save_and_read_vault_context", counting):
+        response = post_analyze({"transcript": LIVE_TRANSCRIPT, "meeting_name": "Vault Sync", "is_internal_context": True})
+        assert response.status_code == 200
+        saved = (vault / "Vault-Sync.txt").read_text(encoding="utf-8")
+    assert writes == ["Vault-Sync"], f"expected one Vault write, got {writes}"
+    assert saved == LIVE_TRANSCRIPT + "\n" and saved.count(LIVE_TRANSCRIPT) == 1
+    print("  [PASS] test_analyze_vault_on_saves_exactly_once")
+
+def test_analyze_vault_off_saves_nothing():
+    def forbid(*args, **kwargs):
+        raise AssertionError("Vault must not be written when is_internal_context is false")
+
+    with isolated_vault() as vault, mock_mode(True), patched("save_and_read_vault_context", forbid):
+        response = post_analyze({"transcript": LIVE_TRANSCRIPT, "meeting_name": "Private", "is_internal_context": False})
+        assert response.status_code == 200
+        assert list(vault.iterdir()) == []
+    print("  [PASS] test_analyze_vault_off_saves_nothing")
+
+def test_analyze_vault_failure_is_safe():
+    def broken(name, text):
+        raise OSError(r"[Errno 28] No space left on device: 'C:\Users\HP\omniscribe-ai\backend\vault\Board.txt'")
+
+    with mock_mode(True), patched("save_and_read_vault_context", broken):
+        response = post_analyze({"transcript": "Confidential board notes.", "meeting_name": "Board", "is_internal_context": True})
+    body = assert_api_error(response, 500, "VAULT_WRITE_FAILED", retryable=True)
+    assert "C:\\" not in response.text and "Errno" not in response.text and "Confidential" not in response.text
+    assert "Vault" in body["error"]["message"]
+    print("  [PASS] test_analyze_vault_failure_is_safe (no path, error number or transcript in the response)")
+
+def test_process_meeting_vault_failure_unchanged():
+    async def fake_stt(filename, audio_bytes):
+        return SPOKEN_TEXT
+
+    def broken(name, text):
+        raise OSError("disk full")
+
+    with mock_mode(True), stubbed_transcription(fake_stt), patched("save_and_read_vault_context", broken):
+        response = client.post("/api/process-meeting", data={"meeting_name": "X", "is_internal_context": "true"},
+                               files={"file": ("m.wav", io.BytesIO(make_valid_wav_bytes()), "audio/wav")})
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to update internal vault storage: disk full"}, "existing error must be unchanged"
+    print("  [PASS] test_process_meeting_vault_failure_unchanged (same status and detail as before the refactor)")
+
+def test_analyze_stays_in_mock_mode_without_web_or_claude():
+    touched = []
+
+    def forbid(name):
+        def _f(*args, **kwargs):
+            touched.append(name)
+            raise AssertionError(name)
+        return _f
+
+    with isolated_vault(), mock_mode(True), no_transcription_allowed(), \
+            patched("get_anthropic_client", forbid("anthropic")), \
+            patched("query_public_internet_fallback", forbid("web search")):
+        body = post_analyze({"transcript": "What is the typical onboarding time for B2B clients?",
+                             "is_internal_context": True, "is_web_fallback": True}).json()
+    assert touched == []
+    assert body["summary"].startswith("[MOCK AI ANALYSIS]")
+    assert all(item.startswith("[MOCK]") for item in body["action_items"])
+    assert [qa["source"] for qa in body["qa_items"]] == ["none", "none"]
+    print("  [PASS] test_analyze_stays_in_mock_mode_without_web_or_claude")
+
+def test_analyze_malformed_requests():
+    cases = {
+        "not JSON": post_analyze(raw=b'{"transcript": "unterminated'),
+        "invalid UTF-8": post_analyze(raw=b'{"transcript": "\xff\xfe"}'),
+        "JSON array": post_analyze([LIVE_TRANSCRIPT]),
+        "JSON string": post_analyze(raw=b'"just text"'),
+        "empty body": post_analyze(raw=b""),
+        "transcript not text": post_analyze({"transcript": 42}),
+        "flag as string": post_analyze({"transcript": LIVE_TRANSCRIPT, "is_internal_context": "true"}),
+        "flag as number": post_analyze({"transcript": LIVE_TRANSCRIPT, "is_web_fallback": 1}),
+        "misspelled flag": post_analyze({"transcript": LIVE_TRANSCRIPT, "is_internal_contxt": True}),
+        "null byte": post_analyze({"transcript": "abc\x00def"}),
+    }
+    for name, response in cases.items():
+        try:
+            assert_api_error(response, 400, "INVALID_REQUEST", retryable=False)
+        except AssertionError as e:
+            raise AssertionError(f"{name}: {e}")
+    assert "is_internal_contxt" in cases["misspelled flag"].json()["error"]["message"]
+    print("  [PASS] test_analyze_malformed_requests (bad JSON, wrong types, unknown fields; nothing is guessed)")
+
+def test_analyze_unexpected_errors_are_safe():
+    async def crash(*args, **kwargs):
+        raise RuntimeError(f"secret stack detail C:/srv with key {FAKE_GROQ_KEY}")
+
+    with isolated_vault(), mock_mode(True), patched("run_meeting_analysis", crash):
+        response = post_analyze({"transcript": "Private remark."})
+    assert_api_error(response, 500, "INTERNAL_ERROR", retryable=True)
+    assert "secret" not in response.text and FAKE_GROQ_KEY not in response.text and "Private remark" not in response.text
+
+    def missing_key():
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY is not configured.")
+    with isolated_vault(), mock_mode(False), patched("get_anthropic_client", missing_key):
+        response = post_analyze({"transcript": LIVE_TRANSCRIPT})
+    assert_api_error(response, 503, "ANALYSIS_NOT_CONFIGURED", retryable=False)
+    assert "ANTHROPIC_API_KEY" not in response.text
+
+    async def failing_analysis(*args, **kwargs):
+        raise HTTPException(status_code=502, detail="Anthropic API error: internal upstream detail")
+    with isolated_vault(), mock_mode(True), patched("run_meeting_analysis", failing_analysis):
+        response = post_analyze({"transcript": LIVE_TRANSCRIPT})
+    assert_api_error(response, 502, "ANALYSIS_FAILED", retryable=True)
+    assert "upstream" not in response.text
+    print("  [PASS] test_analyze_unexpected_errors_are_safe (crash, missing AI key, analysis failure)")
+
+def test_analyze_does_not_log_transcript():
+    records = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    def broken(name, text):
+        raise OSError("disk full")
+
+    handler = Collect(level=logging.DEBUG)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        with isolated_vault(), mock_mode(True):
+            post_analyze({"transcript": "Salary bands for the new hires.", "meeting_name": "HR"})
+        with mock_mode(True), patched("save_and_read_vault_context", broken):
+            post_analyze({"transcript": "Salary bands for the new hires.", "is_internal_context": True})
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
+    assert "Salary" not in "\n".join(records)
+    print("  [PASS] test_analyze_does_not_log_transcript")
+
 if __name__ == "__main__":
     print("Starting OmniScribe AI backend test suite (all mocked, no Groq quota used)...")
     tests = [value for name, value in list(globals().items()) if name.startswith("test_") and callable(value)]

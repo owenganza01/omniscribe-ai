@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -289,78 +289,39 @@ def extract_search_query(text: str) -> str:
     return query
 
 # -----------------------------------------------------------------------------
-# 5. API Endpoints
+# 4b. Shared Transcript Processing (used by /api/process-meeting and /api/analyze-transcript)
 # -----------------------------------------------------------------------------
-@app.get("/api/health", response_model=HealthResponse)
-async def health_check():
-    """
-    Health check endpoint returning system status and configuration state.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    configured = bool(api_key and api_key != "your_anthropic_api_key_here")
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
-    groq_configured = bool(groq_key and groq_key != "your_groq_api_key_here")
-    return {
-        "status": "healthy",
-        "anthropic_configured": configured,
-        "groq_configured": groq_configured,
-        "mock_mode": MOCK_AI_RESPONSE,
-        "model": ANTHROPIC_MODEL,
-        "vault_path": str(VAULT_DIR),
-        "web_fallback_ready": True
-    }
+class VaultWriteError(Exception):
+    """The Vault file could not be written. Each endpoint decides how much of the cause to reveal."""
+    def __init__(self, original: Exception):
+        super().__init__("vault write failed")
+        self.original = original
 
-@app.post("/api/process-meeting", response_model=ProcessMeetingResponse)
-async def process_meeting(
-    file: UploadFile = File(...),
-    is_internal_context: bool = Form(True),
-    is_web_fallback: bool = Form(True),
-    meeting_name: Optional[str] = Form(None)
-):
+def update_vault(sanitized_name: str, transcript: str, enabled: bool) -> str:
     """
-    Processes incoming meeting audio or uploaded call recordings:
-    1. Validates incoming payload.
-    2. Transcribes audio to real speech text using Groq Whisper Large V3 Turbo.
-    3. Manages Vault historical context (only upon successful transcription).
-    4. Routes questions through AI engine against internal vault context.
-    5. Optionally queries public web search if internal knowledge is insufficient.
-    6. Returns structured summary, action items, and Q&A items with source attribution.
+    Appends the transcript to the meeting's Vault file once, only when enabled,
+    and returns the accumulated Vault text used as analysis context ("" when disabled).
     """
-    # 1. Validate incoming file
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file must have a valid filename."
-        )
-
+    if not enabled:
+        return ""
     try:
-        audio_bytes = await file.read()
+        return save_and_read_vault_context(sanitized_name, transcript)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to read incoming audio stream: {str(e)}"
-        )
+        raise VaultWriteError(e) from e
 
-    display_name = (meeting_name or "").strip() or "Untitled meeting"
-    sanitized_name = sanitize_meeting_name(display_name)
-
-    # 2. Real Speech-to-Text Transcription via Groq Whisper Large V3 Turbo
-    # Validates file size (max 25 MB), format header, and calls Groq Whisper API
-    detected_transcript = await transcribe_audio_groq(file.filename, audio_bytes)
-
-    # 3. Vault Context Management (Only saved if transcription succeeded)
-    vault_context_stream = ""
-    if is_internal_context:
-        try:
-            vault_context_stream = save_and_read_vault_context(sanitized_name, detected_transcript)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to update internal vault storage: {str(e)}"
-            )
-
+async def run_meeting_analysis(
+    display_name: str,
+    detected_transcript: str,
+    vault_context_stream: str,
+    is_internal_context: bool,
+    is_web_fallback: bool
+) -> ProcessMeetingResponse:
+    """
+    Summary, action items and Q&A for a finished transcript. Unchanged logic, moved out of process_meeting:
+    mock placeholders while MOCK_AI_RESPONSE is on, otherwise Claude with optional web refinement.
+    """
     # 4. Check for Mock / Non-Paid Test Mode
     if MOCK_AI_RESPONSE:
         # Placeholder analysis for development testing. The transcript above is real Groq output;
@@ -554,6 +515,91 @@ Return strictly the updated JSON matching the required schema.
         qa_items=qa_items
     )
 
+async def process_transcript(
+    display_name: str,
+    sanitized_name: str,
+    transcript: str,
+    is_internal_context: bool,
+    is_web_fallback: bool
+) -> ProcessMeetingResponse:
+    """Everything after speech-to-text: optional Vault save (exactly once), then analysis."""
+    vault_context_stream = update_vault(sanitized_name, transcript, is_internal_context)
+    return await run_meeting_analysis(
+        display_name, transcript, vault_context_stream, is_internal_context, is_web_fallback
+    )
+
+# -----------------------------------------------------------------------------
+# 5. API Endpoints
+# -----------------------------------------------------------------------------
+@app.get("/api/health", response_model=HealthResponse)
+async def health_check():
+    """
+    Health check endpoint returning system status and configuration state.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    configured = bool(api_key and api_key != "your_anthropic_api_key_here")
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    groq_configured = bool(groq_key and groq_key != "your_groq_api_key_here")
+    return {
+        "status": "healthy",
+        "anthropic_configured": configured,
+        "groq_configured": groq_configured,
+        "mock_mode": MOCK_AI_RESPONSE,
+        "model": ANTHROPIC_MODEL,
+        "vault_path": str(VAULT_DIR),
+        "web_fallback_ready": True
+    }
+
+@app.post("/api/process-meeting", response_model=ProcessMeetingResponse)
+async def process_meeting(
+    file: UploadFile = File(...),
+    is_internal_context: bool = Form(True),
+    is_web_fallback: bool = Form(True),
+    meeting_name: Optional[str] = Form(None)
+):
+    """
+    Processes incoming meeting audio or uploaded call recordings:
+    1. Validates incoming payload.
+    2. Transcribes audio to real speech text using Groq Whisper Large V3 Turbo.
+    3. Manages Vault historical context (only upon successful transcription).
+    4. Routes questions through AI engine against internal vault context.
+    5. Optionally queries public web search if internal knowledge is insufficient.
+    6. Returns structured summary, action items, and Q&A items with source attribution.
+    """
+    # 1. Validate incoming file
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file must have a valid filename."
+        )
+
+    try:
+        audio_bytes = await file.read()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read incoming audio stream: {str(e)}"
+        )
+
+    display_name = (meeting_name or "").strip() or "Untitled meeting"
+    sanitized_name = sanitize_meeting_name(display_name)
+
+    # 2. Real Speech-to-Text Transcription via Groq Whisper Large V3 Turbo
+    # Validates file size (max 25 MB), format header, and calls Groq Whisper API
+    detected_transcript = await transcribe_audio_groq(file.filename, audio_bytes)
+
+    # 3-7. Vault + analysis, shared with /api/analyze-transcript (see process_transcript)
+    try:
+        return await process_transcript(
+            display_name, sanitized_name, detected_transcript, is_internal_context, is_web_fallback
+        )
+    except VaultWriteError as e:
+        # Same status and message as before the refactor
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update internal vault storage: {str(e.original)}"
+        )
+
 
 # -----------------------------------------------------------------------------
 # 6. Live Segment Transcription (Phase 3.1)
@@ -610,3 +656,125 @@ async def transcribe_segment(
             retryable=True), seq)
 
     return TranscribeSegmentResponse(success=True, sequence=seq, **result)
+
+
+# -----------------------------------------------------------------------------
+# 7. Analyze an Existing Transcript (Milestone 3.2)
+# -----------------------------------------------------------------------------
+# JSON in, the same response as /api/process-meeting out. No audio, no Groq call.
+# Errors use the Milestone 3.1 shape without "sequence":
+#   {"success": false, "error": {"code": "...", "message": "...", "retry_after_seconds": null, "retryable": false}}
+MAX_TRANSCRIPT_CHARS = 200_000        # ~3.5 hours of fast speech (~900 characters per minute); far above the 2-hour recording cap
+MAX_ANALYZE_BODY_BYTES = 1_000_000    # room for 200,000 characters plus JSON escaping and non-English text
+MAX_MEETING_NAME_CHARS = 200
+ANALYZE_FIELDS = {"transcript", "meeting_name", "is_internal_context", "is_web_fallback"}
+ANALYZE_FLAG_DEFAULTS = {"is_internal_context": False, "is_web_fallback": True}  # Vault OFF unless asked for
+
+class ApiError(Exception):
+    """A request-level error with a stable code, returned in the structured error shape."""
+    def __init__(self, status_code: int, code: str, message: str, retryable: bool = False):
+        super().__init__(code)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+
+    def response(self) -> JSONResponse:
+        return JSONResponse(status_code=self.status_code, content={"success": False, "error": {
+            "code": self.code, "message": self.message, "retry_after_seconds": None, "retryable": self.retryable}})
+
+def _has_control_characters(text: str, allow_line_breaks: bool) -> bool:
+    allowed = "\n\r\t" if allow_line_breaks else ""
+    return any((ord(ch) < 32 and ch not in allowed) or ord(ch) == 127 for ch in text)
+
+def parse_analyze_request(raw_body: bytes) -> Dict[str, Any]:
+    """Validates the JSON body of /api/analyze-transcript. Raises ApiError; never echoes transcript text."""
+    if len(raw_body) > MAX_ANALYZE_BODY_BYTES:
+        raise ApiError(413, "TRANSCRIPT_TOO_LARGE",
+                       f"The request is larger than {MAX_ANALYZE_BODY_BYTES // 1_000_000} MB, so it was not analyzed.")
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ApiError(400, "INVALID_REQUEST", 'The request body must be JSON, for example {"transcript": "..."}.')
+    if not isinstance(data, dict):
+        raise ApiError(400, "INVALID_REQUEST", "The request body must be a JSON object.")
+
+    unknown = sorted(str(key)[:40] for key in data if key not in ANALYZE_FIELDS)
+    if unknown:
+        # A misspelled flag must not silently fall back to a default (it could turn Vault saving on or off)
+        raise ApiError(400, "INVALID_REQUEST",
+                       f"Unknown field(s): {', '.join(unknown[:5])}. Allowed: {', '.join(sorted(ANALYZE_FIELDS))}.")
+
+    transcript = data.get("transcript")
+    if transcript is None:
+        raise ApiError(400, "INVALID_REQUEST", "The 'transcript' field is required.")
+    if not isinstance(transcript, str):
+        raise ApiError(400, "INVALID_REQUEST", "The 'transcript' field must be text.")
+    transcript = transcript.strip()
+    if not transcript:
+        raise ApiError(400, "EMPTY_TRANSCRIPT", "The transcript is empty, so there is nothing to analyze.")
+    if len(transcript) > MAX_TRANSCRIPT_CHARS:
+        raise ApiError(413, "TRANSCRIPT_TOO_LARGE",
+                       f"The transcript is {len(transcript):,} characters, above the {MAX_TRANSCRIPT_CHARS:,} character limit.")
+    if "\x00" in transcript:
+        raise ApiError(400, "INVALID_REQUEST", "The transcript contains unsupported characters.")
+
+    meeting_name = data.get("meeting_name")
+    if meeting_name is not None:
+        if not isinstance(meeting_name, str):
+            raise ApiError(400, "INVALID_MEETING_NAME", "The meeting name must be text.")
+        meeting_name = meeting_name.strip()
+        if len(meeting_name) > MAX_MEETING_NAME_CHARS:
+            raise ApiError(400, "INVALID_MEETING_NAME",
+                           f"The meeting name is too long (maximum {MAX_MEETING_NAME_CHARS} characters).")
+        if _has_control_characters(meeting_name, allow_line_breaks=False):
+            raise ApiError(400, "INVALID_MEETING_NAME", "The meeting name contains unsupported characters.")
+
+    flags = {}
+    for key, default in ANALYZE_FLAG_DEFAULTS.items():
+        value = data.get(key)
+        if value is None:
+            value = default
+        elif not isinstance(value, bool):
+            raise ApiError(400, "INVALID_REQUEST", f"'{key}' must be true or false.")
+        flags[key] = value
+
+    return {"transcript": transcript, "meeting_name": meeting_name or "", **flags}
+
+@app.post("/api/analyze-transcript", response_model=ProcessMeetingResponse)
+async def analyze_transcript(request: Request):
+    """
+    Analyzes a transcript the client already has (for example, joined live segments) through the same
+    Vault + analysis steps as /api/process-meeting. Never sends audio anywhere and never calls Groq.
+    Body (JSON): {"transcript": str, "meeting_name": str?, "is_internal_context": bool?, "is_web_fallback": bool?}
+    """
+    try:
+        params = parse_analyze_request(await request.body())
+    except ApiError as err:
+        return err.response()
+
+    display_name = params["meeting_name"] or "Untitled meeting"
+    sanitized_name = sanitize_meeting_name(display_name)
+    try:
+        return await process_transcript(
+            display_name, sanitized_name, params["transcript"],
+            params["is_internal_context"], params["is_web_fallback"]
+        )
+    except VaultWriteError as e:
+        logger.error("Vault write failed: %s", type(e.original).__name__)
+        return ApiError(500, "VAULT_WRITE_FAILED",
+                        "The transcript could not be saved to the Internal Vault, so it was not analyzed. "
+                        "Try again, or turn off Vault saving.", retryable=True).response()
+    except HTTPException as e:
+        logger.warning("Transcript analysis failed with HTTP %s", e.status_code)
+        if e.status_code == 400:
+            return ApiError(400, "INVALID_MEETING_NAME", "This meeting name cannot be used for a Vault file.").response()
+        if e.status_code in (401, 503):
+            return ApiError(503, "ANALYSIS_NOT_CONFIGURED", "AI analysis is not set up on the server.").response()
+        return ApiError(502, "ANALYSIS_FAILED",
+                        "The transcript was received but could not be analyzed. Try again.", retryable=True).response()
+    except Exception as e:
+        logger.error("Unexpected transcript analysis error: %s", type(e).__name__)
+        return ApiError(500, "INTERNAL_ERROR",
+                        "Something went wrong on the server while analyzing the transcript. It was not analyzed.",
+                        retryable=True).response()
