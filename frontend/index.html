@@ -59,6 +59,18 @@
   .has-bar #scroller { padding-bottom: calc(var(--bar-h) + 40px + env(safe-area-inset-bottom, 0px)); }
   .meter-fill { transform-origin: left center; transform: scaleX(0); transition: transform 80ms linear; }
 
+  .switch:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* Settings dialog: full screen on phones, a centred panel on wider screens */
+  .sheet { position: fixed; inset: 0; width: 100%; max-width: none; height: 100%; max-height: none; margin: 0; padding: 0; border: 0; background: #09090D; color: #F1F1F5; overflow: hidden; }
+  .sheet::backdrop { background: rgba(5,5,7,.72); }
+  .sheet-head { padding-top: max(16px, env(safe-area-inset-top, 0px)); }
+  .sheet-foot { padding-bottom: max(12px, env(safe-area-inset-bottom, 0px)); }
+  @media (min-width: 641px) {
+    .sheet { margin: auto; width: 440px; height: min(820px, calc(100vh - 48px)); border: 1px solid #272733; border-radius: 24px; box-shadow: 0 30px 80px rgba(0,0,0,.6); }
+    .sheet-head { padding-top: 16px; }
+  }
+
   /* flex-shrink: 0 stops the scroller's flex column from squashing open results to 0px height */
   .results { flex-shrink: 0; max-height: 0; opacity: 0; transform: translateY(32px); overflow: hidden; transition: max-height .7s cubic-bezier(.2,.8,.2,1), opacity .5s ease, transform .6s cubic-bezier(.2,.8,.2,1); }
   .results.open { max-height: 20000px; opacity: 1; transform: none; }
@@ -87,6 +99,10 @@
       <div id="liveBadge" hidden class="flex items-center gap-1.5 rounded-full bg-rec/15 px-2.5 py-1.5 text-xs font-semibold text-rec-soft">
         <span class="rec-dot h-2 w-2 rounded-full bg-rec" aria-hidden="true"></span>REC
       </div>
+      <button id="settingsBtn" type="button" aria-label="Settings" aria-haspopup="dialog" aria-controls="settingsDialog"
+        class="flex h-10 w-10 flex-none items-center justify-center rounded-xl text-icon hover:bg-panel hover:text-fg">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
     </header>
 
     <!-- Scrollable body -->
@@ -99,27 +115,12 @@
       </section>
 
       <section class="flex flex-col gap-2.5">
-        <div class="flex flex-col divide-y divide-line rounded-2xl border border-line bg-panel">
-          <div class="flex items-center gap-3.5 px-4 py-3.5">
-            <div class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-raise">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B4B4C0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-            </div>
-            <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span id="vaultLabel" class="text-[15px] font-semibold">Internal Vault Context</span>
-              <span id="vaultStatus" class="text-xs leading-snug text-muted">ON · saves each transcript on this computer, filed by meeting name, as context for AI analysis</span>
-            </div>
-            <button id="vaultSwitch" type="button" role="switch" aria-checked="true" aria-labelledby="vaultLabel" aria-describedby="vaultStatus" class="switch"><span class="knob"></span></button>
+        <div class="flex items-center gap-3 rounded-2xl border border-line bg-panel px-4 py-3">
+          <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Processing settings</span>
+            <span id="settingsSummary" class="text-[13px] leading-snug text-soft">Vault saving off · Web fallback on</span>
           </div>
-          <div class="flex items-center gap-3.5 px-4 py-3.5">
-            <div class="flex h-9 w-9 flex-none items-center justify-center rounded-lg bg-raise">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B4B4C0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
-            </div>
-            <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span id="webLabel" class="text-[15px] font-semibold">Live Web Fallback</span>
-              <span id="webStatus" class="text-xs leading-snug text-muted">ON · allows web lookups for answers when real AI analysis is on. None run in mock mode.</span>
-            </div>
-            <button id="webSwitch" type="button" role="switch" aria-checked="true" aria-labelledby="webLabel" aria-describedby="webStatus" class="switch"><span class="knob"></span></button>
-          </div>
+          <button id="summarySettingsBtn" type="button" aria-haspopup="dialog" aria-controls="settingsDialog" class="h-11 flex-none rounded-xl border border-line bg-raise px-4 text-sm font-semibold hover:bg-line">Change</button>
         </div>
         <p class="flex items-start gap-2 px-1 text-xs leading-snug text-muted">
           <svg class="mt-px flex-none" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#A1A1B0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
@@ -250,6 +251,151 @@
   </main>
 </div>
 
+<!-- Settings: a modal dialog. Escape, the close button, Done, or a click outside closes it. -->
+<dialog id="settingsDialog" class="sheet" aria-labelledby="settingsTitle">
+  <div class="flex h-full flex-col">
+    <div class="sheet-head flex items-center gap-3 border-b border-line px-5 pb-3">
+      <h2 id="settingsTitle" class="flex-1 font-display text-lg font-semibold">Settings</h2>
+      <button id="settingsClose" type="button" aria-label="Close settings" class="flex h-10 w-10 flex-none items-center justify-center rounded-xl text-icon hover:bg-panel hover:text-fg">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="no-scrollbar flex-1 overflow-y-auto px-5 py-5">
+      <div class="flex flex-col gap-7">
+
+        <!-- A. Personal identification -->
+        <section class="flex flex-col gap-3" aria-labelledby="secIdentityTitle">
+          <div class="flex flex-col gap-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <h3 id="secIdentityTitle" class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Personal identification</h3>
+              <span class="rounded-md border border-web/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[.06em] text-web">Used later</span>
+            </div>
+            <p class="text-xs leading-snug text-muted">These names will later help OmniScribe notice when someone speaks to you directly in a meeting. Nothing listens for them yet.</p>
+          </div>
+          <div class="flex flex-col gap-4 rounded-2xl border border-line bg-panel p-4">
+            <div class="flex flex-col gap-1.5">
+              <label for="setName" class="text-[13px] font-semibold">Your name</label>
+              <input id="setName" type="text" maxlength="60" autocomplete="given-name" placeholder="e.g. Tom"
+                class="h-11 w-full rounded-xl border border-line bg-ink px-3 text-base text-fg placeholder:text-dim outline-none transition focus:border-sky focus:ring-4 focus:ring-sky/15">
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <label for="setNicknames" class="text-[13px] font-semibold">Nicknames <span class="font-normal text-muted">(optional)</span></label>
+              <input id="setNicknames" type="text" maxlength="300" autocomplete="off" placeholder="e.g. Tommy, T" aria-describedby="nicknamesHint"
+                class="h-11 w-full rounded-xl border border-line bg-ink px-3 text-base text-fg placeholder:text-dim outline-none transition focus:border-sky focus:ring-4 focus:ring-sky/15">
+              <span id="nicknamesHint" class="text-xs text-muted">Separate names with commas. Up to 10.</span>
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <label for="setMishearings" class="text-[13px] font-semibold">Common mishearings <span class="font-normal text-muted">(optional)</span></label>
+              <input id="setMishearings" type="text" maxlength="300" autocomplete="off" placeholder="e.g. Thom, Tum" aria-describedby="mishearingsHint"
+                class="h-11 w-full rounded-xl border border-line bg-ink px-3 text-base text-fg placeholder:text-dim outline-none transition focus:border-sky focus:ring-4 focus:ring-sky/15">
+              <span id="mishearingsHint" class="text-xs text-muted">Spellings speech-to-text sometimes writes instead of your name. Separate with commas.</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- B. Question detection (saved preferences only) -->
+        <section class="flex flex-col gap-3" aria-labelledby="secDetectTitle">
+          <div class="flex flex-col gap-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <h3 id="secDetectTitle" class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Question detection</h3>
+              <span class="rounded-md border border-web/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[.06em] text-web">Coming soon</span>
+            </div>
+            <p class="text-xs leading-snug text-muted">Your choices are saved now, but this feature isn't built yet. Nothing listens for questions, makes sounds or vibrates.</p>
+          </div>
+          <div class="flex flex-col divide-y divide-line rounded-2xl border border-line bg-panel">
+            <div class="flex items-center gap-3 px-4 py-3.5">
+              <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span id="autoDetectLabel" class="text-[14px] font-semibold">Automatic question detection</span>
+                <span id="autoDetectDesc" class="text-xs leading-snug text-muted">Will suggest an answer when someone asks you a question. Off by default.</span>
+              </div>
+              <button id="setAutoDetect" type="button" role="switch" aria-checked="false" aria-labelledby="autoDetectLabel" aria-describedby="autoDetectDesc" class="switch"><span class="knob"></span></button>
+            </div>
+
+            <fieldset class="flex flex-col gap-2.5 px-4 py-3.5">
+              <legend class="float-left mb-2.5 w-full text-[14px] font-semibold">Answer style</legend>
+              <!-- Each label is "relative" so its visually hidden (absolutely positioned) radio stays inside it.
+                   Without that, the radio sits outside the scrolling area, and focusing it scrolls the whole dialog. -->
+              <div class="grid grid-cols-3 gap-1 rounded-xl bg-ink p-1">
+                <label class="relative cursor-pointer"><input type="radio" name="answerStyle" value="short" class="peer sr-only"><span class="block rounded-lg px-2 py-2.5 text-center text-sm font-medium text-muted transition peer-checked:bg-raise peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-sky">Short</span></label>
+                <label class="relative cursor-pointer"><input type="radio" name="answerStyle" value="balanced" class="peer sr-only"><span class="block rounded-lg px-2 py-2.5 text-center text-sm font-medium text-muted transition peer-checked:bg-raise peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-sky">Balanced</span></label>
+                <label class="relative cursor-pointer"><input type="radio" name="answerStyle" value="detailed" class="peer sr-only"><span class="block rounded-lg px-2 py-2.5 text-center text-sm font-medium text-muted transition peer-checked:bg-raise peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-sky">Detailed</span></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="flex flex-col px-4 py-3.5">
+              <legend class="float-left mb-1.5 w-full text-[14px] font-semibold">Answer delivery</legend>
+              <label class="flex cursor-pointer items-center gap-3 py-2 text-sm"><input type="radio" name="delivery" value="panel" class="h-[18px] w-[18px] flex-none accent-ok">Panel only</label>
+              <label class="flex cursor-pointer items-center gap-3 py-2 text-sm"><input type="radio" name="delivery" value="sound" class="h-[18px] w-[18px] flex-none accent-ok">Panel + sound</label>
+              <label class="flex cursor-pointer items-center gap-3 py-2 text-sm"><input type="radio" name="delivery" value="vibration" class="h-[18px] w-[18px] flex-none accent-ok"><span>Panel + vibration <span class="text-xs text-muted">(not supported on iPhone)</span></span></label>
+            </fieldset>
+
+            <div class="flex items-center gap-3 px-4 py-3.5">
+              <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span id="quietLabel" class="text-[14px] font-semibold">Quiet mode</span>
+                <span id="quietDesc" class="text-xs leading-snug text-muted">Will keep OmniScribe a silent note-taker with no suggestions, for exams, interviews or sensitive meetings.</span>
+              </div>
+              <button id="setQuiet" type="button" role="switch" aria-checked="false" aria-labelledby="quietLabel" aria-describedby="quietDesc" class="switch"><span class="knob"></span></button>
+            </div>
+          </div>
+        </section>
+
+        <!-- C. Privacy and transcription -->
+        <section class="flex flex-col gap-3" aria-labelledby="secPrivacyTitle">
+          <h3 id="secPrivacyTitle" class="text-[12px] font-semibold uppercase tracking-[.08em] text-muted">Privacy &amp; transcription</h3>
+          <div class="flex flex-col divide-y divide-line rounded-2xl border border-line bg-panel">
+            <div class="flex items-center gap-3 px-4 py-3.5">
+              <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span class="flex flex-wrap items-center gap-2">
+                  <span id="liveLabel" class="text-[14px] font-semibold">Live transcription</span>
+                  <span class="rounded-md border border-web/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[.06em] text-web">Coming soon</span>
+                </span>
+                <span id="liveDesc" class="text-xs leading-snug text-muted">Would send short audio chunks to Groq while you record. Not built yet, so it stays off.</span>
+              </div>
+              <button id="setLive" type="button" role="switch" aria-checked="false" aria-labelledby="liveLabel" aria-describedby="liveDesc" class="switch" disabled><span class="knob"></span></button>
+            </div>
+            <div class="flex items-center gap-3 px-4 py-3.5">
+              <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span id="vaultLabel" class="text-[14px] font-semibold">Save transcripts to Internal Vault</span>
+                <span id="vaultDesc" class="text-xs leading-snug text-muted">Saves each transcript as a text file on the computer running the backend (backend/vault), filed by meeting name. Off by default.</span>
+              </div>
+              <button id="vaultSwitch" type="button" role="switch" aria-checked="false" aria-labelledby="vaultLabel" aria-describedby="vaultDesc" class="switch"><span class="knob"></span></button>
+            </div>
+            <div class="flex items-center gap-3 px-4 py-3.5">
+              <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span id="webLabel" class="text-[14px] font-semibold">Live Web Fallback</span>
+                <span id="webDesc" class="text-xs leading-snug text-muted">Allows web lookups for answers when real AI analysis is on. No lookup runs while MOCK_AI_RESPONSE=true.</span>
+              </div>
+              <button id="webSwitch" type="button" role="switch" aria-checked="true" aria-labelledby="webLabel" aria-describedby="webDesc" class="switch"><span class="knob"></span></button>
+            </div>
+          </div>
+          <p id="lockNote" hidden class="flex items-start gap-2 px-1 text-xs leading-snug text-web" role="status">
+            <svg class="mt-px flex-none" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+            <span>Vault and Web settings are locked while a recording or upload is in progress, so it is processed with the settings it started with.</span>
+          </p>
+          <div class="flex flex-col gap-2 rounded-2xl border border-line/70 bg-well p-4">
+            <span class="text-[13px] font-semibold">How your audio and data are handled</span>
+            <ul class="flex list-disc flex-col gap-1.5 pl-4 text-xs leading-snug text-muted">
+              <li>Recording uses this device's microphone.</li>
+              <li>When a recording or upload is processed, the audio is sent to Groq for transcription.</li>
+              <li>Live audio chunk uploads are not built yet. Nothing is sent while you are still recording.</li>
+              <li>With Vault saving on, meeting transcripts are stored as files on the computer running the backend.</li>
+              <li>AI summaries, action items and answers are still mock placeholders.</li>
+              <li>These settings are stored only in this browser.</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="sheet-foot flex items-center gap-3 border-t border-line px-5 pt-3">
+      <p id="storageNote" class="flex-1 text-xs leading-snug text-muted" aria-live="polite">Changes save automatically in this browser.</p>
+      <button id="settingsDone" type="button" class="h-11 flex-none rounded-xl bg-fg px-5 text-sm font-semibold text-ink hover:bg-soft">Done</button>
+    </div>
+  </div>
+</dialog>
+
+
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
@@ -264,7 +410,7 @@
 
   // 2. Application State
   var state = {
-    vault: true,
+    vault: false, // replaced by the saved setting in section 4
     web: true,
     recording: false,
     stopping: false,
@@ -299,20 +445,211 @@
 
   $('errorCloseBtn').addEventListener('click', hideError);
 
-  // 4. Toggle Switches (Vault Context & Live Web Fallback)
-  function bindSwitch(btnId, statusId, key, onText, offText) {
-    $(btnId).addEventListener('click', function () {
-      state[key] = !state[key];
-      $(btnId).setAttribute('aria-checked', String(state[key]));
-      $(statusId).textContent = state[key] ? onText : offText;
+  // 4. Settings, saved in this browser with localStorage
+  // Only values the user has changed are stored. Missing or invalid values fall back to SETTINGS_DEFAULTS,
+  // so a changed default (Vault saving is now OFF) reaches everyone who never chose otherwise,
+  // and a saved choice is never overwritten when the page loads.
+  var SETTINGS_KEY = 'omniscribe.settings';
+  var SETTINGS_VERSION = 1;
+  var SETTINGS_DEFAULTS = {
+    name: '',
+    nicknames: [],
+    mishearings: [],
+    autoDetect: false,       // Coming soon: saved only
+    answerStyle: 'balanced', // Coming soon: saved only
+    delivery: 'panel',       // Coming soon: saved only
+    quietMode: false,        // Coming soon: saved only
+    liveTranscription: false, // Coming soon: cannot be turned on yet
+    vault: false,            // sent as is_internal_context
+    web: true                // sent as is_web_fallback
+  };
+  var MAX_NAMES = 10;
+  var MAX_NAME_LENGTH = 40;
+
+  function isBool(v) { return typeof v === 'boolean'; }
+  function isNameList(v) {
+    return Array.isArray(v) && v.length <= MAX_NAMES && v.every(function (n) {
+      return typeof n === 'string' && n.trim() === n && n.length > 0 && n.length <= MAX_NAME_LENGTH;
     });
   }
-  bindSwitch('vaultSwitch', 'vaultStatus', 'vault',
-    'ON · saves each transcript on this computer, filed by meeting name, as context for AI analysis',
-    'OFF · transcripts are not saved to the Vault');
-  bindSwitch('webSwitch', 'webStatus', 'web',
-    'ON · allows web lookups for answers when real AI analysis is on. None run in mock mode.',
-    'OFF · no web lookups');
+  var SETTINGS_RULES = {
+    name: function (v) { return typeof v === 'string' && v.trim() === v && v.length <= 60; },
+    nicknames: isNameList,
+    mishearings: isNameList,
+    autoDetect: isBool,
+    answerStyle: function (v) { return v === 'short' || v === 'balanced' || v === 'detailed'; },
+    delivery: function (v) { return v === 'panel' || v === 'sound' || v === 'vibration'; },
+    quietMode: isBool,
+    liveTranscription: function (v) { return v === false; }, // not built yet, so only "off" is valid
+    vault: isBool,
+    web: isBool
+  };
+
+  // Reads saved settings, keeping only known keys with valid values. Malformed data is ignored, not deleted.
+  function readSavedSettings() {
+    var saved = {};
+    try {
+      var raw = window.localStorage.getItem(SETTINGS_KEY);
+      if (!raw) return saved;
+      var parsed = JSON.parse(raw);
+      var values = parsed && parsed.version === SETTINGS_VERSION ? parsed.values : null;
+      if (!values || typeof values !== 'object' || Array.isArray(values)) return saved;
+      Object.keys(SETTINGS_RULES).forEach(function (key) {
+        if (Object.prototype.hasOwnProperty.call(values, key) && SETTINGS_RULES[key](values[key])) {
+          saved[key] = values[key];
+        }
+      });
+    } catch (err) {
+      console.warn('Saved settings could not be read. Using defaults.', err);
+    }
+    return saved;
+  }
+
+  var savedSettings = readSavedSettings();
+  var settings = {};
+  Object.keys(SETTINGS_DEFAULTS).forEach(function (key) {
+    settings[key] = Object.prototype.hasOwnProperty.call(savedSettings, key) ? savedSettings[key] : SETTINGS_DEFAULTS[key];
+  });
+  state.vault = settings.vault;
+  state.web = settings.web;
+
+  // Saves one changed value. Writes happen only after a user change, never on page load.
+  function saveSetting(key, value) {
+    if (!SETTINGS_RULES[key] || !SETTINGS_RULES[key](value)) return false;
+    settings[key] = value;
+    savedSettings[key] = value;
+    try {
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({ version: SETTINGS_VERSION, values: savedSettings }));
+      $('storageNote').textContent = 'Changes save automatically in this browser.';
+    } catch (err) {
+      // Private browsing or blocked storage: the change still applies until the page is reloaded
+      $('storageNote').textContent = 'This browser is not saving settings (private mode or blocked storage). Changes apply until you reload.';
+    }
+    return true;
+  }
+
+  // "Tom, Tommy,, tom " -> ["Tom", "Tommy"]: trimmed, no blanks, no case-insensitive duplicates
+  function parseNameList(text) {
+    var seen = {};
+    var list = [];
+    String(text || '').split(',').forEach(function (part) {
+      var n = part.trim().slice(0, MAX_NAME_LENGTH).trim();
+      var k = n.toLowerCase();
+      if (n && !seen[k] && list.length < MAX_NAMES) {
+        seen[k] = true;
+        list.push(n);
+      }
+    });
+    return list;
+  }
+
+  function isBusy() {
+    return state.recording || state.stopping || state.isProcessing;
+  }
+
+  // Vault and Web are sent with the request, so they are locked while a recording or upload is in progress
+  function refreshSettingsLock() {
+    var busy = isBusy();
+    $('vaultSwitch').disabled = busy;
+    $('webSwitch').disabled = busy;
+    $('lockNote').hidden = !busy;
+  }
+
+  function renderSettingsSummary() {
+    $('settingsSummary').textContent =
+      'Vault saving ' + (settings.vault ? 'on' : 'off') + ' · Web fallback ' + (settings.web ? 'on' : 'off');
+  }
+
+  function applySettingsToForm() {
+    $('setName').value = settings.name;
+    $('setNicknames').value = settings.nicknames.join(', ');
+    $('setMishearings').value = settings.mishearings.join(', ');
+    $('setAutoDetect').setAttribute('aria-checked', String(settings.autoDetect));
+    $('setQuiet').setAttribute('aria-checked', String(settings.quietMode));
+    $('setLive').setAttribute('aria-checked', 'false');
+    $('vaultSwitch').setAttribute('aria-checked', String(settings.vault));
+    $('webSwitch').setAttribute('aria-checked', String(settings.web));
+    document.querySelectorAll('input[name="answerStyle"]').forEach(function (r) { r.checked = r.value === settings.answerStyle; });
+    document.querySelectorAll('input[name="delivery"]').forEach(function (r) { r.checked = r.value === settings.delivery; });
+  }
+
+  function bindSettingSwitch(id, key, onChange) {
+    $(id).addEventListener('click', function () {
+      if ($(id).disabled) return;
+      var next = !settings[key];
+      if (!saveSetting(key, next)) return;
+      $(id).setAttribute('aria-checked', String(next));
+      if (onChange) onChange(next);
+    });
+  }
+
+  bindSettingSwitch('vaultSwitch', 'vault', function (on) {
+    if (isBusy()) return;
+    state.vault = on;
+    renderSettingsSummary();
+  });
+  bindSettingSwitch('webSwitch', 'web', function (on) {
+    if (isBusy()) return;
+    state.web = on;
+    renderSettingsSummary();
+  });
+  bindSettingSwitch('setAutoDetect', 'autoDetect'); // saved only; nothing is detected yet
+  bindSettingSwitch('setQuiet', 'quietMode');       // saved only
+
+  $('setName').addEventListener('input', function () {
+    saveSetting('name', this.value.trim().slice(0, 60));
+  });
+  [['setNicknames', 'nicknames'], ['setMishearings', 'mishearings']].forEach(function (pair) {
+    var input = $(pair[0]);
+    input.addEventListener('input', function () { saveSetting(pair[1], parseNameList(input.value)); });
+    // Tidy the field when the user leaves it, never while they type
+    input.addEventListener('change', function () { input.value = settings[pair[1]].join(', '); });
+  });
+  document.querySelectorAll('input[name="answerStyle"]').forEach(function (r) {
+    r.addEventListener('change', function () { if (r.checked) saveSetting('answerStyle', r.value); });
+  });
+  document.querySelectorAll('input[name="delivery"]').forEach(function (r) {
+    r.addEventListener('change', function () { if (r.checked) saveSetting('delivery', r.value); });
+  });
+
+  // Settings dialog (native <dialog>: keeps focus inside, closes with Escape)
+  var settingsDialog = $('settingsDialog');
+  var settingsOpener = null;
+
+  function openSettings(e) {
+    settingsOpener = (e && e.currentTarget) || $('settingsBtn');
+    applySettingsToForm();
+    refreshSettingsLock();
+    if (typeof settingsDialog.showModal === 'function') settingsDialog.showModal();
+    else settingsDialog.setAttribute('open', '');
+  }
+
+  function closeSettings() {
+    if (typeof settingsDialog.close === 'function') {
+      if (settingsDialog.open) settingsDialog.close();
+    } else {
+      settingsDialog.removeAttribute('open');
+      onSettingsClosed();
+    }
+  }
+
+  function onSettingsClosed() {
+    $('setNicknames').value = settings.nicknames.join(', ');
+    $('setMishearings').value = settings.mishearings.join(', ');
+    if (settingsOpener) settingsOpener.focus();
+  }
+
+  settingsDialog.addEventListener('close', onSettingsClosed);
+  // A click on the backdrop (outside the panel) closes it
+  settingsDialog.addEventListener('click', function (e) { if (e.target === settingsDialog) closeSettings(); });
+  $('settingsBtn').addEventListener('click', openSettings);
+  $('summarySettingsBtn').addEventListener('click', openSettings);
+  $('settingsClose').addEventListener('click', closeSettings);
+  $('settingsDone').addEventListener('click', closeSettings);
+
+  applySettingsToForm();
+  renderSettingsSummary();
+  refreshSettingsLock();
 
   // 5. Dynamic MIME Type Detection for Browser & iOS Safari
   function getSupportedAudioMimeType() {
@@ -434,6 +771,7 @@
 
       recorder.onstop = async function () {
         state.stopping = false;
+        refreshSettingsLock();
         var actualMime = recorder.mimeType || mimeType || 'audio/webm';
         var ext = 'webm';
         if (actualMime.includes('mp4') || actualMime.includes('aac')) ext = 'm4a';
@@ -470,6 +808,7 @@
       $('timer').textContent = '00:00';
       $('recBar').hidden = false;
       $('app').classList.add('has-bar');
+      refreshSettingsLock();
       startMeter(stream);
 
       state.timer = setInterval(function () {
@@ -518,6 +857,7 @@
       state.mediaStream.getTracks().forEach(function (t) { t.stop(); });
       state.mediaStream = null;
     }
+    refreshSettingsLock();
   }
 
   function resetRecordingUI() {
@@ -531,6 +871,7 @@
     $('liveBadge').hidden = true;
     $('recBar').hidden = true;
     $('app').classList.remove('has-bar');
+    refreshSettingsLock();
   }
 
   // Ignore taps within 600 ms of the previous one, so a double-tap cannot stop and immediately restart.
@@ -621,6 +962,7 @@
   async function transmitPayload(fileOrBlob, fileName) {
     if (state.isProcessing) return;
     state.isProcessing = true;
+    refreshSettingsLock();
     hideError();
     // Previous results stay on screen until this request succeeds, so a failure never erases them
 
@@ -694,6 +1036,7 @@
       );
     } finally {
       state.isProcessing = false;
+      refreshSettingsLock();
       $('processing').hidden = true;
     }
   }
