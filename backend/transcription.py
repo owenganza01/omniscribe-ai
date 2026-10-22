@@ -1,4 +1,5 @@
 import os
+import math
 import asyncio
 from pathlib import Path
 from typing import Tuple, Optional
@@ -182,14 +183,18 @@ async def _send_transcription_request(
     headers: dict,
     filename: str,
     audio_bytes: bytes,
-    mime_type: str
+    mime_type: str,
+    form_fields: Optional[dict] = None
 ) -> httpx.Response:
-    """Sends one multipart request to Groq. Keeps no state, so it can be safely repeated."""
+    """
+    Sends one multipart request to Groq. Keeps no state, so it can be safely repeated.
+    Without form_fields it sends exactly what the full-recording path has always sent.
+    """
     return await client.post(
         GROQ_WHISPER_URL,
         headers=headers,
         files={"file": (filename, audio_bytes, mime_type)},
-        data={"model": GROQ_WHISPER_MODEL, "response_format": "json", "temperature": "0.0"}
+        data=form_fields or {"model": GROQ_WHISPER_MODEL, "response_format": "json", "temperature": "0.0"}
     )
 
 async def _post_with_single_retry(
@@ -197,14 +202,15 @@ async def _post_with_single_retry(
     headers: dict,
     filename: str,
     audio_bytes: bytes,
-    mime_type: str
+    mime_type: str,
+    form_fields: Optional[dict] = None
 ) -> httpx.Response:
     """
     Sends the request, retrying at most once for transient 5xx responses or dropped connections.
     Timeouts propagate immediately without a retry.
     """
     try:
-        response = await _send_transcription_request(client, headers, filename, audio_bytes, mime_type)
+        response = await _send_transcription_request(client, headers, filename, audio_bytes, mime_type, form_fields)
     except httpx.TimeoutException:
         raise
     except httpx.RequestError:
@@ -214,7 +220,7 @@ async def _post_with_single_retry(
         return response
 
     await asyncio.sleep(RETRY_DELAY_SECONDS)
-    return await _send_transcription_request(client, headers, filename, audio_bytes, mime_type)
+    return await _send_transcription_request(client, headers, filename, audio_bytes, mime_type, form_fields)
 
 async def transcribe_audio_groq(
     filename: str,
@@ -283,6 +289,270 @@ async def transcribe_audio_groq(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Network error connecting to Groq transcription service: {type(e).__name__}"
+        )
+    finally:
+        if should_close_client:
+            await client.aclose()
+
+
+# -----------------------------------------------------------------------------
+# Live segment transcription (Phase 3.1)
+# -----------------------------------------------------------------------------
+# One short, independently decodable audio segment is transcribed per request. Unlike
+# transcribe_audio_groq above, failures are raised as SegmentTranscriptionError with a stable
+# machine-readable code, so the future live-transcription frontend can tell a rate limit from a
+# used-up quota, a timeout or bad audio. Silence is a normal result ("silent"), not an error.
+# Nothing here writes to the Vault, logs transcript text, or keeps the audio.
+
+MAX_SEGMENT_PROMPT_CHARS = 500   # Groq accepts up to 224 prompt tokens; 500 characters stays well inside that
+
+# Whisper's own heuristic treats a segment as silence only when BOTH signals agree.
+# A single low value is never enough to drop text.
+NO_SPEECH_THRESHOLD = 0.8        # no_speech_prob at or above this...
+LOW_LOGPROB_THRESHOLD = -1.0     # ...AND avg_logprob at or below this marks likely silence
+HIGH_COMPRESSION_RATIO = 2.4     # repetitive output; flagged as low confidence, never dropped
+
+
+class SegmentTranscriptionError(Exception):
+    """A segment could not be transcribed. Carries a safe message and a stable error code."""
+
+    def __init__(self, status_code: int, code: str, message: str,
+                 retry_after_seconds: Optional[int] = None, retryable: bool = False):
+        super().__init__(code)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.retry_after_seconds = retry_after_seconds
+        self.retryable = retryable
+
+    def to_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "retry_after_seconds": self.retry_after_seconds,
+            "retryable": self.retryable,
+        }
+
+
+def parse_retry_after(value: Optional[str]) -> Optional[int]:
+    """
+    Returns Retry-After as whole seconds (rounded up), or None when absent or not a number.
+    An HTTP-date or unreadable value gives None: a wait time is never guessed.
+    """
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    if math.isnan(seconds) or math.isinf(seconds) or seconds < 0:
+        return None
+    return int(math.ceil(seconds))
+
+
+def _describe_wait(seconds: int) -> str:
+    if seconds < 120:
+        return f"{seconds} seconds"
+    if seconds < 7200:
+        return f"about {round(seconds / 60)} minutes"
+    return f"about {round(seconds / 3600)} hours"
+
+
+def validate_segment_prompt(prompt: Optional[str]) -> Optional[str]:
+    """Returns the cleaned continuity prompt, None when there is none, or raises INVALID_PROMPT."""
+    if prompt is None:
+        return None
+    if not isinstance(prompt, str):
+        raise SegmentTranscriptionError(400, "INVALID_PROMPT", "The context prompt must be text.")
+    cleaned = prompt.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_SEGMENT_PROMPT_CHARS:
+        raise SegmentTranscriptionError(
+            400, "INVALID_PROMPT",
+            f"The context prompt is too long ({len(cleaned)} characters, maximum {MAX_SEGMENT_PROMPT_CHARS}). "
+            "Send only the end of the previous transcript."
+        )
+    if any((ord(ch) < 32 and ch not in "\n\r\t") or ord(ch) == 127 for ch in cleaned):
+        raise SegmentTranscriptionError(400, "INVALID_PROMPT", "The context prompt contains unsupported control characters.")
+    return cleaned
+
+
+def validate_segment_audio(filename: str, audio_bytes: bytes) -> Tuple[str, str]:
+    """Checks one segment before any Groq call. Reuses validate_audio_file for format and header checks."""
+    if not filename:
+        raise SegmentTranscriptionError(400, "INVALID_AUDIO", "The audio segment must have a filename.")
+    size = len(audio_bytes)
+    if size == 0:
+        raise SegmentTranscriptionError(400, "EMPTY_AUDIO", "The audio segment is empty (0 bytes), so there was nothing to transcribe.")
+    if size > MAX_FILE_SIZE_BYTES:
+        raise SegmentTranscriptionError(
+            413, "FILE_TOO_LARGE",
+            f"The audio segment is {size / (1024 * 1024):.1f} MB, above the 25 MB speech-to-text limit."
+        )
+    try:
+        return validate_audio_file(filename, audio_bytes)
+    except HTTPException as e:
+        # Our own validation messages (format or header problems) are safe to show
+        raise SegmentTranscriptionError(400, "INVALID_AUDIO", str(e.detail))
+
+
+def _finite_number(value) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def _build_segment_result(payload) -> dict:
+    """Turns a Groq verbose_json payload into the endpoint's result, applying the conservative silence filter."""
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str):
+        raise SegmentTranscriptionError(
+            502, "TRANSCRIPTION_UNAVAILABLE",
+            "The speech-to-text service returned an unexpected response. This audio segment was not transcribed.",
+            retryable=True
+        )
+
+    pieces = []
+    kept_text = []
+    filtered_count = 0
+    raw_segments = payload.get("segments")
+    for seg in raw_segments if isinstance(raw_segments, list) else []:
+        if not isinstance(seg, dict):
+            continue
+        seg_text = seg.get("text") if isinstance(seg.get("text"), str) else ""
+        no_speech = _finite_number(seg.get("no_speech_prob"))
+        logprob = _finite_number(seg.get("avg_logprob"))
+        compression = _finite_number(seg.get("compression_ratio"))
+        likely_silence = (no_speech is not None and logprob is not None
+                          and no_speech >= NO_SPEECH_THRESHOLD and logprob <= LOW_LOGPROB_THRESHOLD)
+        low_confidence = not likely_silence and (
+            (logprob is not None and logprob <= LOW_LOGPROB_THRESHOLD)
+            or (compression is not None and compression >= HIGH_COMPRESSION_RATIO)
+        )
+        pieces.append({
+            "start": _finite_number(seg.get("start")),
+            "end": _finite_number(seg.get("end")),
+            "text": seg_text.strip(),
+            "no_speech_prob": no_speech,
+            "avg_logprob": logprob,
+            "compression_ratio": compression,
+            "filtered": likely_silence,
+            "low_confidence": low_confidence,
+        })
+        if likely_silence:
+            filtered_count += 1
+        elif seg_text.strip():
+            kept_text.append(seg_text.strip())
+
+    # Without usable segment details, the top-level text is used as returned
+    final_text = " ".join(kept_text) if pieces else text.strip()
+    language = payload.get("language")
+    return {
+        "status": "transcribed" if final_text else "silent",
+        "text": final_text,
+        "duration_seconds": _finite_number(payload.get("duration")),
+        "language": language if isinstance(language, str) else None,
+        "segments": pieces,
+        "filtered_segment_count": filtered_count,
+        "model": GROQ_WHISPER_MODEL,
+    }
+
+
+def _segment_rate_limit_error(response: httpx.Response) -> SegmentTranscriptionError:
+    """HTTP 429: a used-up daily allowance only when Groq's message says so; otherwise a temporary limit."""
+    message = _extract_error_message(response).lower()
+    retry_after = parse_retry_after(response.headers.get("retry-after"))
+    if any(marker in message for marker in DAILY_QUOTA_MARKERS):
+        text = "The daily speech-to-text allowance has been reached. Transcription is unavailable until it resets."
+        if retry_after is not None:
+            text += f" Groq suggests trying again in {_describe_wait(retry_after)}."
+        return SegmentTranscriptionError(429, "QUOTA_EXHAUSTED", text, retry_after, retryable=False)
+    text = "Transcription is temporarily paused by the speech-to-text rate limit."
+    text += f" Retry in {_describe_wait(retry_after)}." if retry_after is not None else " Wait a moment before retrying."
+    return SegmentTranscriptionError(429, "RATE_LIMITED", text, retry_after, retryable=True)
+
+
+async def transcribe_segment_groq(
+    filename: str,
+    audio_bytes: bytes,
+    prompt: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None
+) -> dict:
+    """
+    Transcribes one complete audio segment with Groq Whisper Large V3 Turbo (verbose_json).
+    Returns the structured result; raises SegmentTranscriptionError on any failure.
+    Makes at most two Groq requests (one retry for transient 5xx or dropped connections),
+    never retries 429s or timeouts, and never logs or stores the audio or transcript.
+    """
+    clean_prompt = validate_segment_prompt(prompt)
+    sanitized_filename, mime_type = validate_segment_audio(filename, audio_bytes)
+
+    try:
+        api_key = get_groq_api_key()
+    except HTTPException:
+        raise SegmentTranscriptionError(
+            503, "TRANSCRIPTION_NOT_CONFIGURED",
+            "Speech-to-text is not set up on the server (the Groq API key is missing)."
+        )
+    headers = {"Authorization": f"Bearer {api_key}"}
+    form_fields = {"model": GROQ_WHISPER_MODEL, "response_format": "verbose_json", "temperature": "0.0"}
+    if clean_prompt:
+        form_fields["prompt"] = clean_prompt
+
+    should_close_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=GROQ_TIMEOUT)
+    try:
+        try:
+            response = await _post_with_single_retry(
+                client, headers, sanitized_filename, audio_bytes, mime_type, form_fields
+            )
+        except httpx.TimeoutException:
+            raise SegmentTranscriptionError(
+                504, "TRANSCRIPTION_TIMEOUT",
+                "Transcription took too long and was stopped. This audio segment was not transcribed.",
+                retryable=True
+            )
+        except httpx.RequestError:
+            raise SegmentTranscriptionError(
+                503, "TRANSCRIPTION_UNAVAILABLE",
+                "Transcription is temporarily unavailable. This audio segment could not be processed.",
+                retryable=True
+            )
+
+        if response.status_code == 200:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            return _build_segment_result(payload)
+        if response.status_code == 429:
+            raise _segment_rate_limit_error(response)
+        if response.status_code == 401:
+            raise SegmentTranscriptionError(
+                503, "TRANSCRIPTION_NOT_CONFIGURED",
+                "Speech-to-text is not set up correctly on the server (the Groq API key was rejected)."
+            )
+        if response.status_code == 413:
+            raise SegmentTranscriptionError(413, "FILE_TOO_LARGE", "The audio segment is above the 25 MB speech-to-text limit.")
+        if response.status_code == 400:
+            raise SegmentTranscriptionError(
+                422, "INVALID_AUDIO",
+                "The speech-to-text service could not read this audio segment. It may be damaged or incomplete."
+            )
+        if response.status_code in TRANSIENT_STATUS_CODES:
+            raise SegmentTranscriptionError(
+                503, "TRANSCRIPTION_UNAVAILABLE",
+                "Transcription is temporarily unavailable. This audio segment could not be processed.",
+                retryable=True
+            )
+        raise SegmentTranscriptionError(
+            502, "TRANSCRIPTION_UNAVAILABLE",
+            f"The speech-to-text service returned an unexpected error (HTTP {response.status_code}). This audio segment was not transcribed."
         )
     finally:
         if should_close_client:

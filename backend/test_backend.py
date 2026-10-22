@@ -794,8 +794,341 @@ def test_mock_answers_report_no_source():
     assert [qa["source"] for qa in body["qa_items"]] == ["none", "none"], "mock answers perform no lookup"
     print("  [PASS] test_mock_answers_report_no_source")
 
+# -----------------------------------------------------------------------------
+# Live segment transcription: /api/transcribe-segment (Phase 3.1). All Groq calls are mocked.
+# -----------------------------------------------------------------------------
+import logging
+from backend.transcription import (
+    transcribe_segment_groq,
+    SegmentTranscriptionError,
+    parse_retry_after,
+    MAX_SEGMENT_PROMPT_CHARS,
+)
+
+def _verbose_payload(segments, text=None, duration=15.0):
+    joined = "".join(seg["text"] for seg in segments) if text is None else text
+    return {"text": joined, "language": "en", "duration": duration, "segments": segments}
+
+def _seg(text, start=0.0, end=5.0, no_speech=0.01, logprob=-0.2, compression=1.3):
+    return {"id": 0, "seek": 0, "start": start, "end": end, "text": text,
+            "no_speech_prob": no_speech, "avg_logprob": logprob, "compression_ratio": compression}
+
+@contextmanager
+def segment_groq(handler):
+    """Routes the endpoint's Groq calls to a MockTransport handler. Returns the list of requests made."""
+    calls = []
+    original = bmain.transcribe_segment_groq
+
+    def recording_handler(request):
+        request.read()
+        calls.append(request)
+        return handler(request)
+
+    async def wrapped(filename, audio_bytes, prompt=None):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(recording_handler)) as http_client:
+            return await original(filename, audio_bytes, prompt=prompt, client=http_client)
+
+    bmain.transcribe_segment_groq = wrapped
+    try:
+        with groq_key(FAKE_GROQ_KEY):
+            yield calls
+    finally:
+        bmain.transcribe_segment_groq = original
+
+def post_segment(data=None, filename="segment-0001.wav", audio=None, include_file=True):
+    files = {"file": (filename, io.BytesIO(make_valid_wav_bytes() if audio is None else audio), "audio/wav")} if include_file else None
+    return client.post("/api/transcribe-segment", files=files, data=data or {})
+
+def form_field(request, name):
+    body = request.content.decode("latin1")
+    marker = f'name="{name}"\r\n\r\n'
+    if marker not in body:
+        return None
+    return body.split(marker, 1)[1].split("\r\n", 1)[0]
+
+def assert_error(response, status_code, code, retryable=None):
+    assert response.status_code == status_code, f"expected {status_code}, got {response.status_code}: {response.text}"
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == code, f"expected {code}, got {body['error']['code']}"
+    assert set(body["error"].keys()) == {"code", "message", "retry_after_seconds", "retryable"}
+    assert body["error"]["message"]
+    if retryable is not None:
+        assert body["error"]["retryable"] is retryable
+    assert FAKE_GROQ_KEY not in response.text, "the Groq key leaked into an error response"
+    return body
+
+SEGMENT_RESPONSE_KEYS = {"success", "status", "sequence", "text", "duration_seconds", "language",
+                         "segments", "filtered_segment_count", "model"}
+
+def test_segment_success_structured_response():
+    payload = _verbose_payload([_seg(" Hello team,", 0.0, 2.0), _seg(" let's start the review.", 2.0, 5.5)])
+    with segment_groq(lambda r: httpx.Response(200, json=payload)) as calls:
+        response = post_segment({"sequence": "7"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body.keys()) == SEGMENT_RESPONSE_KEYS
+    assert body["success"] is True and body["status"] == "transcribed"
+    assert body["sequence"] == 7
+    assert body["text"] == "Hello team, let's start the review."
+    assert body["model"] == "whisper-large-v3-turbo"
+    assert body["language"] == "en" and body["duration_seconds"] == 15.0
+    assert body["filtered_segment_count"] == 0
+    assert [s["start"] for s in body["segments"]] == [0.0, 2.0]
+    assert all(s["filtered"] is False and s["low_confidence"] is False for s in body["segments"])
+    assert len(calls) == 1
+    assert form_field(calls[0], "response_format") == "verbose_json"
+    assert form_field(calls[0], "model") == "whisper-large-v3-turbo"
+    assert form_field(calls[0], "prompt") is None, "no prompt was given, so none may be sent"
+    print("  [PASS] test_segment_success_structured_response")
+
+def test_segment_without_segment_details_uses_text():
+    with segment_groq(lambda r: httpx.Response(200, json={"text": " Plain text only. "})):
+        body = post_segment().json()
+    assert body["status"] == "transcribed" and body["text"] == "Plain text only."
+    assert body["segments"] == [] and body["sequence"] is None
+    print("  [PASS] test_segment_without_segment_details_uses_text")
+
+def test_segment_prompt_is_passed_for_continuity():
+    with segment_groq(lambda r: httpx.Response(200, json=_verbose_payload([_seg(" continued.")]))) as calls:
+        response = post_segment({"prompt": "  ...and the budget for Q3 is  "})
+    assert response.status_code == 200
+    assert form_field(calls[0], "prompt") == "...and the budget for Q3 is"
+    with segment_groq(lambda r: httpx.Response(200, json=_verbose_payload([_seg(" x")]))) as calls:
+        post_segment({"prompt": "   "})
+    assert form_field(calls[0], "prompt") is None, "a blank prompt must not be sent"
+    print("  [PASS] test_segment_prompt_is_passed_for_continuity")
+
+def test_segment_rejects_excessive_or_malformed_prompt():
+    with segment_groq(lambda r: httpx.Response(200, json={"text": "x"})) as calls:
+        too_long = post_segment({"prompt": "a" * (MAX_SEGMENT_PROMPT_CHARS + 1)})
+        control = post_segment({"prompt": "hello\x00world"})
+        at_limit = post_segment({"prompt": "a" * MAX_SEGMENT_PROMPT_CHARS})
+    assert_error(too_long, 400, "INVALID_PROMPT", retryable=False)
+    assert_error(control, 400, "INVALID_PROMPT", retryable=False)
+    assert at_limit.status_code == 200
+    assert len(calls) == 1, "invalid prompts must be rejected before any Groq request"
+    print("  [PASS] test_segment_rejects_excessive_or_malformed_prompt (no Groq call)")
+
+def test_segment_silence_is_a_result_not_an_error():
+    with segment_groq(lambda r: httpx.Response(200, json={"text": "   ", "segments": []})):
+        empty = post_segment()
+    assert empty.status_code == 200
+    assert empty.json()["status"] == "silent" and empty.json()["text"] == ""
+
+    hallucination = _verbose_payload([_seg(" Thank you.", no_speech=0.95, logprob=-1.4)])
+    with segment_groq(lambda r: httpx.Response(200, json=hallucination)):
+        body = post_segment().json()
+    assert body["status"] == "silent" and body["text"] == ""
+    assert body["filtered_segment_count"] == 1
+    assert body["segments"][0]["filtered"] is True and body["segments"][0]["text"] == "Thank you."
+    print("  [PASS] test_segment_silence_is_a_result_not_an_error (empty text and likely-silence filter)")
+
+def test_segment_silence_filter_is_conservative():
+    payload = _verbose_payload([
+        _seg(" Quiet but confident words.", no_speech=0.92, logprob=-0.3),  # one signal only: kept
+        _seg(" mumbled reply", no_speech=0.10, logprob=-1.6),                # one signal only: kept, flagged
+        _seg(" yes yes yes yes yes", compression=3.1),                       # repetitive: kept, flagged
+        _seg(" Thanks for watching.", no_speech=0.85, logprob=-1.2),         # both signals: filtered
+    ])
+    with segment_groq(lambda r: httpx.Response(200, json=payload)):
+        body = post_segment().json()
+    assert body["text"] == "Quiet but confident words. mumbled reply yes yes yes yes yes"
+    assert [s["filtered"] for s in body["segments"]] == [False, False, False, True]
+    assert [s["low_confidence"] for s in body["segments"]] == [False, True, True, False]
+    assert body["filtered_segment_count"] == 1 and body["status"] == "transcribed"
+    print("  [PASS] test_segment_silence_filter_is_conservative (one low value never drops speech)")
+
+def test_segment_rejects_bad_audio_before_groq():
+    oversized = make_valid_wav_bytes() + b"\x00" * (26 * 1024 * 1024)
+    with segment_groq(lambda r: httpx.Response(200, json={"text": "x"})) as calls:
+        empty = post_segment(audio=b"")
+        pdf = post_segment(filename="notes.pdf", audio=b"%PDF-1.4")
+        fake_webm = post_segment(filename="seg.webm", audio=make_valid_wav_bytes())
+        big = post_segment(filename="seg.wav", audio=oversized)
+        missing = post_segment(include_file=False)
+        bad_seq = post_segment({"sequence": "-1"})
+    assert_error(empty, 400, "EMPTY_AUDIO", retryable=False)
+    assert_error(pdf, 400, "INVALID_AUDIO", retryable=False)
+    assert_error(fake_webm, 400, "INVALID_AUDIO")
+    assert_error(big, 413, "FILE_TOO_LARGE", retryable=False)
+    assert_error(missing, 400, "INVALID_REQUEST")
+    assert_error(bad_seq, 400, "INVALID_REQUEST")
+    assert len(calls) == 0, "invalid segments must never reach Groq"
+    print("  [PASS] test_segment_rejects_bad_audio_before_groq (empty, format, header, 25 MB, missing file, bad sequence)")
+
+def test_segment_rate_limited_with_retry_after():
+    handler = lambda r: httpx.Response(429, headers={"retry-after": "45"},
+                                       json={"error": {"message": "Rate limit reached on requests per minute (RPM)"}})
+    with segment_groq(handler) as calls:
+        response = post_segment({"sequence": "3"})
+    body = assert_error(response, 429, "RATE_LIMITED", retryable=True)
+    assert body["error"]["retry_after_seconds"] == 45
+    assert "45 seconds" in body["error"]["message"]
+    assert response.headers.get("retry-after") == "45"
+    assert body["sequence"] == 3
+    assert len(calls) == 1, "a 429 must never be retried automatically"
+    print("  [PASS] test_segment_rate_limited_with_retry_after (45 s passed through, no retry)")
+
+def test_segment_rate_limited_without_retry_after_invents_nothing():
+    with segment_groq(lambda r: httpx.Response(429, json={"error": {"message": "Too many requests"}})):
+        response = post_segment()
+    body = assert_error(response, 429, "RATE_LIMITED", retryable=True)
+    assert body["error"]["retry_after_seconds"] is None
+    assert "retry-after" not in response.headers
+    assert not any(ch.isdigit() for ch in body["error"]["message"]), "no wait time may be invented"
+    print("  [PASS] test_segment_rate_limited_without_retry_after_invents_nothing")
+
+def test_segment_retry_after_parsing():
+    assert parse_retry_after("45") == 45
+    assert parse_retry_after("2.5") == 3
+    assert parse_retry_after(" 0 ") == 0
+    assert parse_retry_after(None) is None
+    assert parse_retry_after("") is None
+    assert parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") is None
+    assert parse_retry_after("-5") is None
+    assert parse_retry_after("nan") is None
+    print("  [PASS] test_segment_retry_after_parsing (numbers rounded up; dates and junk give no value)")
+
+def test_segment_daily_quota_exhausted():
+    rpd = lambda r: httpx.Response(429, json={"error": {"message": "Rate limit reached for model `whisper-large-v3-turbo` on requests per day (RPD): Limit 2000, Used 2000"}})
+    asd = lambda r: httpx.Response(429, headers={"retry-after": "3600"},
+                                   json={"error": {"message": "Rate limit reached on audio seconds per day (ASD)"}})
+    ash = lambda r: httpx.Response(429, headers={"retry-after": "120"},
+                                   json={"error": {"message": "Rate limit reached on audio seconds per hour (ASH)"}})
+    with segment_groq(rpd) as calls:
+        body = assert_error(post_segment(), 429, "QUOTA_EXHAUSTED", retryable=False)
+    assert body["error"]["retry_after_seconds"] is None and len(calls) == 1
+    with segment_groq(asd):
+        body = assert_error(post_segment(), 429, "QUOTA_EXHAUSTED", retryable=False)
+    assert body["error"]["retry_after_seconds"] == 3600 and "about 60 minutes" in body["error"]["message"]
+    with segment_groq(ash):
+        body = assert_error(post_segment(), 429, "RATE_LIMITED", retryable=True)
+    assert body["error"]["retry_after_seconds"] == 120
+    print("  [PASS] test_segment_daily_quota_exhausted (RPD/ASD = quota; hourly limit stays temporary)")
+
+def test_segment_timeout():
+    def handler(request):
+        raise httpx.ReadTimeout("Read timed out")
+    with segment_groq(handler) as calls:
+        assert_error(post_segment(), 504, "TRANSCRIPTION_TIMEOUT", retryable=True)
+    assert len(calls) == 1, "timeouts must not be retried"
+    print("  [PASS] test_segment_timeout (no retry)")
+
+def test_segment_service_failure_and_network_error():
+    with segment_groq(lambda r: httpx.Response(503, text="busy")) as calls:
+        assert_error(post_segment(), 503, "TRANSCRIPTION_UNAVAILABLE", retryable=True)
+    assert len(calls) == 2, "transient 5xx is retried exactly once"
+
+    def refused(request):
+        raise httpx.ConnectError("connection refused")
+    with segment_groq(refused) as calls:
+        assert_error(post_segment(), 503, "TRANSCRIPTION_UNAVAILABLE", retryable=True)
+    assert len(calls) == 2
+
+    replies = [httpx.Response(502, text="bad gateway"), httpx.Response(200, json={"text": " Recovered."})]
+    with segment_groq(lambda r: replies.pop(0)) as calls:
+        response = post_segment()
+    assert response.status_code == 200 and response.json()["text"] == "Recovered." and len(calls) == 2
+
+    with segment_groq(lambda r: httpx.Response(200, text="<html>proxy page</html>")) as calls:
+        assert_error(post_segment(), 502, "TRANSCRIPTION_UNAVAILABLE", retryable=True)
+    assert len(calls) == 1
+    print("  [PASS] test_segment_service_failure_and_network_error (one retry, then a clear error)")
+
+def test_segment_groq_rejects_audio_or_key():
+    with segment_groq(lambda r: httpx.Response(400, json={"error": {"message": "could not decode audio"}})):
+        assert_error(post_segment(), 422, "INVALID_AUDIO", retryable=False)
+    with segment_groq(lambda r: httpx.Response(401, json={"error": {"message": "Invalid API Key"}})):
+        assert_error(post_segment(), 503, "TRANSCRIPTION_NOT_CONFIGURED", retryable=False)
+    with groq_key(PLACEHOLDER_GROQ_KEY):
+        assert_error(post_segment(), 503, "TRANSCRIPTION_NOT_CONFIGURED", retryable=False)
+    print("  [PASS] test_segment_groq_rejects_audio_or_key")
+
+def test_segment_internal_error_is_safe():
+    original = bmain.transcribe_segment_groq
+
+    async def broken(filename, audio_bytes, prompt=None):
+        raise RuntimeError(f"secret internal path C:/srv/omniscribe with key {FAKE_GROQ_KEY}")
+
+    bmain.transcribe_segment_groq = broken
+    try:
+        response = post_segment({"sequence": "11"})
+    finally:
+        bmain.transcribe_segment_groq = original
+    body = assert_error(response, 500, "INTERNAL_ERROR", retryable=True)
+    assert "secret" not in response.text and "C:/srv" not in response.text
+    assert body["sequence"] == 11
+    print("  [PASS] test_segment_internal_error_is_safe (no exception text or key in the response)")
+
+def test_segment_never_touches_vault_analysis_or_web():
+    touched = []
+    originals = (bmain.save_and_read_vault_context, bmain.query_public_internet_fallback, bmain.get_anthropic_client)
+
+    def forbid(name):
+        def _f(*args, **kwargs):
+            touched.append(name)
+            raise AssertionError(f"{name} must not be called by /api/transcribe-segment")
+        return _f
+
+    bmain.save_and_read_vault_context = forbid("vault")
+    bmain.query_public_internet_fallback = forbid("web search")
+    bmain.get_anthropic_client = forbid("anthropic")
+    try:
+        # Real-AI mode on purpose: even then, the segment endpoint must not analyze anything
+        with isolated_vault() as vault, mock_mode(False), \
+                segment_groq(lambda r: httpx.Response(200, json=_verbose_payload([_seg(" Private words.")]))):
+            response = post_segment({"prompt": "earlier private words"})
+            assert response.status_code == 200
+            assert list(vault.iterdir()) == [], "a segment was written to the Vault"
+    finally:
+        bmain.save_and_read_vault_context, bmain.query_public_internet_fallback, bmain.get_anthropic_client = originals
+    assert touched == []
+    assert set(response.json().keys()) == SEGMENT_RESPONSE_KEYS, "segment responses never include summaries or answers"
+    print("  [PASS] test_segment_never_touches_vault_analysis_or_web")
+
+def test_segment_does_not_log_transcript_or_prompt():
+    records = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Collect(level=logging.DEBUG)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        with segment_groq(lambda r: httpx.Response(200, json=_verbose_payload([_seg(" Confidential salary figures.")]))):
+            post_segment({"prompt": "board meeting secrets"})
+        with segment_groq(lambda r: httpx.Response(429, json={"error": {"message": "slow down"}})):
+            post_segment({"prompt": "board meeting secrets"})
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
+    logged = "\n".join(records)
+    assert "Confidential" not in logged and "secrets" not in logged
+    print("  [PASS] test_segment_does_not_log_transcript_or_prompt")
+
+def test_full_recording_request_is_unchanged():
+    """The full-recording path still sends plain JSON format with no prompt, and returns plain text."""
+    seen = []
+
+    def handler(request):
+        request.read()
+        seen.append(request)
+        return httpx.Response(200, json={"text": SPOKEN_TEXT})
+
+    assert run_transcription(handler) == SPOKEN_TEXT
+    assert form_field(seen[0], "response_format") == "json"
+    assert form_field(seen[0], "model") == "whisper-large-v3-turbo"
+    assert form_field(seen[0], "temperature") == "0.0"
+    assert form_field(seen[0], "prompt") is None
+    print("  [PASS] test_full_recording_request_is_unchanged (process-meeting still sends the same Groq request)")
+
 if __name__ == "__main__":
-    print("Starting OmniScribe AI Milestone 4 Phase B Test Suite (all mocked, no Groq quota used)...")
+    print("Starting OmniScribe AI backend test suite (all mocked, no Groq quota used)...")
     tests = [value for name, value in list(globals().items()) if name.startswith("test_") and callable(value)]
     for test in tests:
         test()

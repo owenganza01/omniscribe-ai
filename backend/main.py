@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import logging
 import urllib.parse
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -8,10 +9,14 @@ from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import httpx
 from anthropic import Anthropic, APIError, AuthenticationError
-from backend.transcription import transcribe_audio_groq
+from backend.transcription import transcribe_audio_groq, transcribe_segment_groq, SegmentTranscriptionError
+
+# Logs error types only. Transcript text, prompts and audio are never logged.
+logger = logging.getLogger("omniscribe")
 
 # -----------------------------------------------------------------------------
 # 1. Environment & Paths Configuration
@@ -66,6 +71,27 @@ class ProcessMeetingResponse(BaseModel):
     summary: str
     action_items: List[str]
     qa_items: List[QAItem]
+
+class SegmentPiece(BaseModel):
+    start: Optional[float] = None
+    end: Optional[float] = None
+    text: str
+    no_speech_prob: Optional[float] = None
+    avg_logprob: Optional[float] = None
+    compression_ratio: Optional[float] = None
+    filtered: bool = Field(..., description="True when Whisper's own signals both indicate silence; its text is left out of 'text'")
+    low_confidence: bool = Field(..., description="Kept in 'text', but the model was unsure or the output looks repetitive")
+
+class TranscribeSegmentResponse(BaseModel):
+    success: bool
+    status: str = Field(..., description="'transcribed' (speech found) or 'silent' (no speech; not an error)")
+    sequence: Optional[int] = Field(None, description="Echo of the client's segment number, for ordering")
+    text: str
+    duration_seconds: Optional[float] = None
+    language: Optional[str] = None
+    segments: List[SegmentPiece]
+    filtered_segment_count: int
+    model: str
 
 class HealthResponse(BaseModel):
     status: str
@@ -527,3 +553,60 @@ Return strictly the updated JSON matching the required schema.
         action_items=action_items,
         qa_items=qa_items
     )
+
+
+# -----------------------------------------------------------------------------
+# 6. Live Segment Transcription (Phase 3.1)
+# -----------------------------------------------------------------------------
+# Error responses from this endpoint only use this shape (other endpoints keep FastAPI's {"detail": ...}):
+#   {"success": false, "sequence": <int|null>, "error": {"code": "RATE_LIMITED", "message": "...",
+#    "retry_after_seconds": <int|null>, "retryable": <bool>}}
+# A Retry-After header is added only when Groq supplied a wait time.
+MAX_SEGMENT_SEQUENCE = 1_000_000
+
+def segment_error_response(err: SegmentTranscriptionError, sequence: Optional[int] = None) -> JSONResponse:
+    headers = {"Retry-After": str(err.retry_after_seconds)} if err.retry_after_seconds is not None else None
+    return JSONResponse(
+        status_code=err.status_code,
+        content={"success": False, "sequence": sequence, "error": err.to_dict()},
+        headers=headers,
+    )
+
+@app.post("/api/transcribe-segment", response_model=TranscribeSegmentResponse)
+async def transcribe_segment(
+    file: Optional[UploadFile] = File(None),
+    prompt: Optional[str] = Form(None),
+    sequence: Optional[str] = Form(None)
+):
+    """
+    Transcribes ONE complete, independently decodable audio segment for live transcription.
+    Speech-to-text only: no Vault writes, no AI analysis, no web search, and nothing is stored.
+    `prompt` is optional context (the end of the previous transcript) for continuity.
+    `sequence` is an optional segment number echoed back so the client can keep segments in order.
+    """
+    seq: Optional[int] = None
+    if sequence not in (None, ""):
+        if not re.fullmatch(r"[0-9]{1,7}", sequence) or int(sequence) > MAX_SEGMENT_SEQUENCE:
+            return segment_error_response(SegmentTranscriptionError(
+                400, "INVALID_REQUEST", f"'sequence' must be a whole number from 0 to {MAX_SEGMENT_SEQUENCE}."))
+        seq = int(sequence)
+
+    if file is None or not file.filename:
+        return segment_error_response(SegmentTranscriptionError(
+            400, "INVALID_REQUEST", "Send one audio segment in the 'file' field."), seq)
+
+    try:
+        audio_bytes = await file.read()
+        result = await transcribe_segment_groq(file.filename, audio_bytes, prompt=prompt)
+    except SegmentTranscriptionError as err:
+        logger.warning("Segment transcription failed: %s", err.code)
+        return segment_error_response(err, seq)
+    except Exception as e:
+        # The exception text could contain internal details, so only its type is logged and none of it is returned
+        logger.error("Unexpected segment transcription error: %s", type(e).__name__)
+        return segment_error_response(SegmentTranscriptionError(
+            500, "INTERNAL_ERROR",
+            "Something went wrong on the server while processing this audio segment. It was not transcribed.",
+            retryable=True), seq)
+
+    return TranscribeSegmentResponse(success=True, sequence=seq, **result)
